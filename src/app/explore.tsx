@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
-import { View, Text, Pressable, TextInput, StyleSheet, ScrollView, Modal } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Alert } from '../lib/alert';
 import { useFocusEffect } from 'expo-router';
 
@@ -8,17 +8,22 @@ import {
   getAppConfig, getLastGroupmates, getSessionHeadToHead, enqueueCustomGroup, enqueuePlayer,
   getWaitingGroups, setCustomGroup, disbandCustomGroup, swapMatchPlayer,
   pausePlayer, resumePlayer, leaveQueue, createMatch, endMatch,
-  type Level, type Player, type QueueRow, type ActiveMatch, type Rival, type WaitingGroup, type Court,
+  getAllPlayers, getForcedPartners, getPartnerPairs, setForcedPartners, removeForcedPartner,
+  type Level, type Player, type QueueRow, type ActiveMatch, type Rival, type WaitingGroup, type Court, type PartnerPair,
 } from '../db/db';
 import { planAutoQueue, balanceTeams, minutesSince } from '../logic/matchmaking';
-import { useColors, type Palette } from '../theme';
+import { useColors } from '../theme';
+import {
+  Avatar, Badge, BodyText, Button, Card, Checkbox, Dialog, EmptyText, FieldLabel, List, ListRow,
+  LevelBadge, Screen, Section, Segmented, TextField, levelOptions,
+} from '../components/ui/kit';
 
 type FilterLevel = Level | 'All';
-const FILTERS: FilterLevel[] = ['All', 'Beginner', 'Intermediate', 'Advance', 'Pro'];
+const FILTER_LEVELS: FilterLevel[] = ['All', 'Beginner', 'Intermediate', 'Advance', 'Pro'];
+const MODES: { value: 'queue' | 'play'; label: string }[] = [{ value: 'queue', label: 'Add to queue' }, { value: 'play', label: 'Play now' }];
 
 export default function QueueScreen() {
   const C = useColors();
-  const styles = useMemo(() => makeStyles(C), [C]);
 
   const [available, setAvailable] = useState<Player[]>([]);
   const [queue, setQueue] = useState<QueueRow[]>([]);
@@ -38,14 +43,26 @@ export default function QueueScreen() {
   const [swapOutId, setSwapOutId] = useState<number | null>(null);
   const [swapSearch, setSwapSearch] = useState('');
 
+  const [pairs, setPairs] = useState<Record<number, number>>({});
+  const [pairList, setPairList] = useState<PartnerPair[]>([]);
+  const [allPlayers, setAllPlayers] = useState<Player[]>([]);
+  const [partnerOpen, setPartnerOpen] = useState(false);
+  const [partnerSel, setPartnerSel] = useState<number[]>([]);
+  const [partnerSearch, setPartnerSearch] = useState('');
+  const [addSel, setAddSel] = useState<number[]>([]);
+
   const refresh = useCallback(() => {
     setAvailable(getPlayersNotQueued());
     setQueue(getQueue());
     setMatches(getActiveMatches());
     setGroups(getWaitingGroups());
+    setPairs(getForcedPartners());
+    setPairList(getPartnerPairs());
+    setAllPlayers(getAllPlayers());
   }, []);
   useFocusEffect(useCallback(() => { refresh(); }, [refresh]));
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const openCourts = useMemo<Court[]>(() => getOpenCourts(), [matches, customOpen]);
 
   const filteredAvailable = useMemo(() => {
@@ -79,24 +96,94 @@ export default function QueueScreen() {
     return q === '' ? swapCandidates : swapCandidates.filter((p) => p.name.toLowerCase().includes(q));
   }, [swapCandidates, swapSearch]);
 
-  function add(id: number) { enqueuePlayer(id); refresh(); }
-  function togglePause(r: QueueRow) { r.status === 'paused' ? resumePlayer(r.entry_id) : pausePlayer(r.entry_id); refresh(); }
+  const nameOf = useMemo(() => new Map(allPlayers.map((p) => [p.player_id, p.name])), [allPlayers]);
+  const partnerName = (id: number) => (pairs[id] != null ? nameOf.get(pairs[id]) : undefined);
+  const withPartner = (id: number, base: string) => { const m = partnerName(id); return m ? (base ? `${base} · with ${m}` : `with ${m}`) : base; };
+
+  const filteredPartnerPicks = useMemo(() => {
+    const q = partnerSearch.trim().toLowerCase();
+    return q === '' ? allPlayers : allPlayers.filter((p) => p.name.toLowerCase().includes(q));
+  }, [allPlayers, partnerSearch]);
+
+  function openPartner() { setPartnerSel([]); setPartnerSearch(''); setPartnerOpen(true); }
+  function togglePartnerPick(id: number) {
+    setPartnerSel((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length >= 2 ? [prev[1], id] : [...prev, id]));
+  }
+  function confirmPartner() {
+    if (partnerSel.length !== 2) return;
+    const [a, b] = partnerSel;
+    const replaced = [a, b].filter((id) => pairs[id] != null && !partnerSel.includes(pairs[id]));
+    const link = () => { setForcedPartners(a, b); setPartnerOpen(false); setPartnerSel([]); refresh(); };
+    if (replaced.length) {
+      const who = replaced.map((id) => `${nameOf.get(id)} (now with ${nameOf.get(pairs[id])})`).join(' and ');
+      Alert.alert('Replace partner?', `${who} will be unlinked from their current partner.`, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Replace', onPress: link },
+      ]);
+    } else link();
+  }
+  function unlink(pair: PartnerPair) {
+    Alert.alert('Unlink partners', `${pair.a.name} and ${pair.b.name} will queue separately from now on.`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Unlink', style: 'destructive', onPress: () => { removeForcedPartner(pair.a.player_id); refresh(); } },
+    ]);
+  }
+
+  function add(id: number) { enqueuePlayer(id); setAddSel((prev) => prev.filter((x) => x !== id && x !== pairs[id])); refresh(); }
+  function toggleAddSel(id: number) { setAddSel((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id])); }
+  const visibleSel = addSel.filter((id) => filteredAvailable.some((p) => p.player_id === id));
+  const allVisibleSelected = filteredAvailable.length > 0 && filteredAvailable.every((p) => addSel.includes(p.player_id));
+  function toggleAddAll() {
+    const ids = filteredAvailable.map((p) => p.player_id);
+    setAddSel((prev) => (allVisibleSelected ? prev.filter((x) => !ids.includes(x)) : [...new Set([...prev, ...ids])]));
+  }
+  function addSelected() {
+    if (!visibleSel.length) return;
+    visibleSel.forEach((id) => enqueuePlayer(id)); // partners come along automatically
+    setAddSel([]);
+    refresh();
+  }
+  function togglePause(r: QueueRow) { if (r.status === 'paused') resumePlayer(r.entry_id); else pausePlayer(r.entry_id); refresh(); }
   function remove(id: number) { leaveQueue(id); refresh(); }
 
   function handleAutoQueue() {
     const { matchConfig } = getAppConfig();
     const pool = getWaitingPlayers(); const oc = getOpenCourts(); const recent = getLastGroupmates();
-    if (!oc.length) { Alert.alert('Auto Queue', 'No open courts available.'); return; }
-    const plans = planAutoQueue(pool, oc.length, new Date(), matchConfig, recent);
-    if (!plans.length) { Alert.alert('Auto Queue', `Not enough players. Need at least ${matchConfig.playersPerMatch} waiting.`); return; }
+    if (!oc.length) { Alert.alert('Auto queue', 'No open courts available.'); return; }
+    const plans = planAutoQueue(pool, oc.length, new Date(), matchConfig, recent, getForcedPartners());
+    if (!plans.length) { Alert.alert('Auto queue', `Not enough players. Need at least ${matchConfig.playersPerMatch} waiting.`); return; }
     plans.forEach((plan, i) => { const court = oc[i]; createMatch(court.court_id, matchConfig.matchType, plan.team1.map((p) => p.player_id), plan.team2.map((p) => p.player_id)); });
-    refresh(); Alert.alert('Auto Queue', `Assigned ${plans.length} match(es).`);
+    refresh(); Alert.alert('Auto queue', `Assigned ${plans.length} match(es).`);
   }
 
-  function finish(m: ActiveMatch, t: 1 | 2) { endMatch(m.match_id, t); refresh(); }
+  function finish(m: ActiveMatch, t: 1 | 2) {
+    endMatch(m.match_id, t);
+    refresh();
+    offerNextOnCourt(m.court_id, m.court_name);
+  }
+
+  // After a match ends, offer to put the next group straight onto the court that just opened.
+  function offerNextOnCourt(courtId: number, courtName: string) {
+    if (!getOpenCourts().some((c) => c.court_id === courtId)) return; // closed meanwhile
+    const { matchConfig } = getAppConfig();
+    const [plan] = planAutoQueue(getWaitingPlayers(), 1, new Date(), matchConfig, getLastGroupmates(), getForcedPartners());
+    if (!plan) return;
+    const teams = `${plan.team1.map((p) => p.name).join(' & ')}  vs  ${plan.team2.map((p) => p.name).join(' & ')}`;
+    Alert.alert(`Next up on ${courtName}?`, teams, [
+      { text: 'Not now', style: 'cancel' },
+      {
+        text: 'Send to court',
+        onPress: () => {
+          createMatch(courtId, matchConfig.matchType, plan.team1.map((p) => p.player_id), plan.team2.map((p) => p.player_id));
+          refresh();
+        },
+      },
+    ]);
+  }
 
   function openCustom() { setEditingGroupId(null); setCustomSel([]); setCustomSearch(''); setCustomMode('queue'); setCustomCourtId(null); setCustomOpen(true); }
   function openEditGroup(g: WaitingGroup) { setEditingGroupId(g.group_id); setCustomSel(g.members.map((m) => m.player_id)); setCustomSearch(''); setCustomMode('queue'); setCustomCourtId(null); setCustomOpen(true); }
+  function closeCustom() { setCustomOpen(false); setEditingGroupId(null); }
   function disband(g: WaitingGroup) {
     Alert.alert('Disband group', 'Members stay in the queue as individuals.', [
       { text: 'Cancel', style: 'cancel' },
@@ -107,350 +194,366 @@ export default function QueueScreen() {
     setCustomSel((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length >= need ? prev : [...prev, id]));
   }
   function confirmCustom() {
-    if (customSel.length !== need) { Alert.alert('Custom Match', `Select exactly ${need} players.`); return; }
+    if (customSel.length !== need) { Alert.alert('Custom match', `Select exactly ${need} players.`); return; }
 
     if (editingGroupId != null) {
       setCustomGroup(editingGroupId, customSel);
       setCustomOpen(false); setEditingGroupId(null); setCustomSel([]); refresh();
-      Alert.alert('Group Updated', 'The custom group was changed and keeps its place in line.');
+      Alert.alert('Group updated', 'The custom group was changed and keeps its place in line.');
       return;
     }
 
     if (customMode === 'play') {
-      if (customCourtId == null) { Alert.alert('Custom Match', 'Choose a court to play on.'); return; }
+      if (customCourtId == null) { Alert.alert('Custom match', 'Choose a court to play on.'); return; }
       const { matchConfig } = getAppConfig();
       const pool = getWaitingPlayers();
       const chosen = pool.filter((p) => customSel.includes(p.player_id));
-      if (chosen.length !== need) { Alert.alert('Custom Match', 'Selected players must all be waiting.'); return; }
-      const { team1, team2 } = balanceTeams(chosen);
+      if (chosen.length !== need) { Alert.alert('Custom match', 'Selected players must all be waiting.'); return; }
+      const { team1, team2 } = balanceTeams(chosen, {}, getForcedPartners());
       createMatch(customCourtId, matchConfig.matchType, team1.map((p) => p.player_id), team2.map((p) => p.player_id));
       setCustomOpen(false); setCustomSel([]); setCustomCourtId(null); refresh();
-      Alert.alert('Custom Match', 'The custom match is now on court.');
+      Alert.alert('Custom match', 'The custom match is now on court.');
     } else {
       const { averageWaitMin } = enqueueCustomGroup(customSel);
       setCustomOpen(false); setCustomSel([]); refresh();
-      Alert.alert('Custom Match Queued', `Group inserted with an averaged wait of ${averageWaitMin.toFixed(2)} minutes.`);
+      Alert.alert('Custom match queued', `Group inserted with an averaged wait of ${averageWaitMin.toFixed(2)} minutes.`);
     }
   }
 
+  function openSwap(m: ActiveMatch) { setSwapMatch(m); setSwapOutId(null); setSwapSearch(''); }
+  function closeSwap() { setSwapMatch(null); setSwapOutId(null); setSwapSearch(''); }
   function doSwap(inId: number) {
     if (!swapMatch || swapOutId == null) return;
     const res = swapMatchPlayer(swapMatch.match_id, swapOutId, inId);
     if (!res.ok) { Alert.alert('Cannot swap', res.reason ?? ''); return; }
-    setSwapMatch(null); setSwapOutId(null); setSwapSearch(''); refresh();
+    closeSwap(); refresh();
   }
 
-  const Pill = ({ text, kind }: { text: string; kind: 'neutral' | 'playing' | 'wait' }) => {
-    const m = { neutral: [C.card2, C.muted], playing: [C.lime, C.onLime], wait: [C.amber, '#241a00'] }[kind];
-    return <View style={{ backgroundColor: m[0], borderRadius: 999, paddingVertical: 4, paddingHorizontal: 10 }}><Text style={{ color: m[1], fontSize: 11, fontWeight: '700' }}>{text}</Text></View>;
-  };
-  const rivalLabel = (r: Rival) => (r.wins > r.losses ? `${anchorName} leads ${r.wins}-${r.losses}` : r.losses > r.wins ? `${r.name} leads ${r.losses}-${r.wins}` : `Tied ${r.wins}-${r.losses}`);
+  const rivalLabel = (r: Rival) => (r.wins > r.losses ? `${anchorName} leads ${r.wins}–${r.losses}` : r.losses > r.wins ? `${r.name} leads ${r.losses}–${r.wins}` : `Tied ${r.wins}–${r.losses}`);
 
   const now = new Date();
-  const waitingCount = waitingList.length;
   const names = (t: { name: string }[]) => t.map((m) => m.name).join(' & ');
+  const confirmLabel = editingGroupId != null ? 'Save group' : customMode === 'play' ? 'Play now' : 'Add to queue';
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={{ padding: 20, paddingBottom: 48 }}>
-      <Text style={styles.h1}>Queue</Text>
-
-      <Text style={styles.label}>Add players</Text>
-      <TextInput style={styles.input} placeholder="Search by name" placeholderTextColor={C.muted} value={search} onChangeText={setSearch} autoCorrect={false} clearButtonMode="while-editing" />
-      <View style={styles.segWrap}>
-        {FILTERS.map((f) => (
-          <Pressable key={f} onPress={() => setLevelFilter(f)} style={({ pressed }) => [styles.segPill, levelFilter === f && styles.segPillOn, pressed && styles.pressed]}>
-            <Text style={[styles.segText, levelFilter === f && styles.segTextOn]}>{f}</Text>
-          </Pressable>
-        ))}
+    <Screen title="Queue" subtitle={`${waitingList.length} waiting · ${matches.length} on court`}>
+      <View style={styles.actions}>
+        <Button title="Auto queue" onPress={handleAutoQueue} style={{ flex: 1 }} />
+        <Button title="Custom match" variant="secondary" onPress={openCustom} style={{ flex: 1 }} />
       </View>
-      <View style={styles.card}>
-        {filteredAvailable.length === 0 ? (
-          <Text style={styles.empty}>{available.length === 0 ? 'No available players. Add some in Admin.' : 'No players match.'}</Text>
+
+      <Section title="On court" count={matches.length}>
+        {matches.length === 0 ? (
+          <List><EmptyText>No matches in progress.</EmptyText></List>
         ) : (
-          filteredAvailable.map((p) => (
-            <Pressable key={p.player_id} onPress={() => add(p.player_id)} style={({ pressed }) => [styles.row, pressed && styles.pressed]}>
-              <Text style={styles.rowName} numberOfLines={1}>{p.name}</Text>
-              <Pill text={p.level} kind="neutral" />
-              <View style={styles.addTag}><Text style={styles.addTagText}>Add</Text></View>
-            </Pressable>
+          matches.map((m) => (
+            <Card key={m.match_id}>
+              <View style={styles.matchHead}>
+                <Text style={[styles.courtName, { color: C.text }]}>{m.court_name}</Text>
+                <Badge text="Playing" tone="success" />
+                <View style={{ flex: 1 }} />
+                <Button title="Edit players" variant="plain" size="sm" onPress={() => openSwap(m)} />
+              </View>
+              <View style={[styles.teams, { borderColor: C.line }]}>
+                <Text style={[styles.team, { color: C.text }]} numberOfLines={2}>{names(m.team1)}</Text>
+                <Text style={{ color: C.muted, fontSize: 13 }}>vs</Text>
+                <Text style={[styles.team, { color: C.text, textAlign: 'right' }]} numberOfLines={2}>{names(m.team2)}</Text>
+              </View>
+              <View style={styles.actions}>
+                <Button title="Team 1 won" variant="secondary" onPress={() => finish(m, 1)} style={{ flex: 1 }} />
+                <Button title="Team 2 won" variant="secondary" onPress={() => finish(m, 2)} style={{ flex: 1 }} />
+              </View>
+            </Card>
           ))
         )}
-      </View>
-
-      <Pressable onPress={handleAutoQueue} style={({ pressed }) => [styles.autoBtn, pressed && styles.pressed]}>
-        <Text style={styles.autoBtnText}>Auto Queue</Text>
-      </Pressable>
-      <Pressable onPress={openCustom} style={({ pressed }) => [styles.customBtn, pressed && styles.pressed]}>
-        <Text style={styles.customBtnText}>Custom Match</Text>
-      </Pressable>
+      </Section>
 
       {groups.length > 0 && (
-        <>
-          <View style={styles.headRow}><Text style={styles.h2}>Custom Groups</Text><Text style={styles.count}>{groups.length}</Text></View>
-          {groups.map((g) => (
-            <View key={g.group_id} style={styles.groupCard}>
-              <Text style={styles.groupMembers}>{g.members.map((m) => m.name).join(', ')}</Text>
-              <View style={styles.groupBtns}>
-                <Pressable onPress={() => openEditGroup(g)} style={({ pressed }) => [styles.miniBtn, { backgroundColor: C.blue }, pressed && styles.pressed]}><Text style={[styles.miniText, { color: '#fff' }]}>Edit</Text></Pressable>
-                <Pressable onPress={() => disband(g)} style={({ pressed }) => [styles.miniBtn, { backgroundColor: C.red }, pressed && styles.pressed]}><Text style={[styles.miniText, { color: '#fff' }]}>Disband</Text></Pressable>
-              </View>
-            </View>
-          ))}
-        </>
-      )}
-
-      <View style={styles.headRow}><Text style={styles.h2}>On Courts</Text><Text style={styles.count}>{matches.length}</Text></View>
-      {matches.length === 0 ? (
-        <Text style={styles.empty}>No matches in progress.</Text>
-      ) : (
-        matches.map((m) => (
-          <View key={m.match_id} style={styles.matchCard}>
-            <View style={styles.matchHead}>
-              <Text style={styles.courtName}>{m.court_name}</Text>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <Pressable onPress={() => { setSwapMatch(m); setSwapOutId(null); setSwapSearch(''); }} style={({ pressed }) => [styles.editChip, pressed && styles.pressed]}><Text style={styles.editChipText}>Edit</Text></Pressable>
-                <Pill text="Playing" kind="playing" />
-              </View>
-            </View>
-            <Text style={styles.teamLine}>{names(m.team1)}</Text>
-            <Text style={styles.vs}>vs</Text>
-            <Text style={styles.teamLine}>{names(m.team2)}</Text>
-            <View style={styles.winRow}>
-              <Pressable onPress={() => finish(m, 1)} style={({ pressed }) => [styles.winBtn, { backgroundColor: C.blue }, pressed && styles.pressed]}><Text style={[styles.winBtnText, { color: '#fff' }]}>Team 1 Won</Text></Pressable>
-              <Pressable onPress={() => finish(m, 2)} style={({ pressed }) => [styles.winBtn, { backgroundColor: C.lime }, pressed && styles.pressed]}><Text style={[styles.winBtnText, { color: C.onLime }]}>Team 2 Won</Text></Pressable>
-            </View>
-          </View>
-        ))
-      )}
-
-      <View style={styles.headRow}><Text style={styles.h2}>Current Queue</Text><Text style={styles.count}>{waitingCount} waiting</Text></View>
-      <View style={styles.card}>
-        {sortedQueue.length === 0 ? (
-          <Text style={styles.empty}>Queue is empty.</Text>
-        ) : (
-          sortedQueue.map((q) => {
-            const wait = Math.floor(minutesSince(q.waiting_since, now));
-            return (
-              <View key={q.entry_id} style={[styles.row, q.status === 'playing' && { opacity: 0.5 }]}>
-                <Text style={styles.rowName} numberOfLines={1}>{q.name}</Text>
-                <Pill text={q.level} kind="neutral" />
-                {q.status === 'playing' ? <Pill text="Playing" kind="playing" /> : q.status === 'paused' ? <Pill text="Paused" kind="wait" /> : <Pill text={`${wait}m`} kind="wait" />}
-                {q.status !== 'playing' && (
+        <Section title="Custom groups" count={groups.length}>
+          <List>
+            {groups.map((g, i) => (
+              <ListRow
+                key={g.group_id}
+                last={i === groups.length - 1}
+                title={g.members.map((m) => m.name).join(', ')}
+                subtitle={`${g.members.length} players · keeps its place in line`}
+                trailing={
                   <>
-                    <Pressable onPress={() => togglePause(q)} style={({ pressed }) => [styles.miniBtn, { backgroundColor: C.amber }, pressed && styles.pressed]}><Text style={styles.miniText}>{q.status === 'paused' ? 'Resume' : 'Pause'}</Text></Pressable>
-                    <Pressable onPress={() => remove(q.entry_id)} style={({ pressed }) => [styles.miniBtn, { backgroundColor: C.red }, pressed && styles.pressed]}><Text style={[styles.miniText, { color: '#fff' }]}>Leave</Text></Pressable>
+                    <Button title="Edit" variant="plain" size="sm" onPress={() => openEditGroup(g)} />
+                    <Button title="Disband" variant="plainDestructive" size="sm" onPress={() => disband(g)} />
                   </>
-                )}
-              </View>
-            );
-          })
+                }
+              />
+            ))}
+          </List>
+        </Section>
+      )}
+
+      <Section
+        title="Forced partners"
+        count={pairList.length}
+        action={<Button title="Add pair" variant="plain" size="sm" onPress={openPartner} />}
+        footer="Partners always join the queue together, are paused or removed together, and play on the same team."
+      >
+        <List>
+          {pairList.length === 0 ? (
+            <EmptyText>No partners linked yet.</EmptyText>
+          ) : (
+            pairList.map((pair, i) => (
+              <ListRow
+                key={`${pair.a.player_id}-${pair.b.player_id}`}
+                last={i === pairList.length - 1}
+                leading={<Avatar name={`${pair.a.name.charAt(0)} ${pair.b.name.charAt(0)}`} />}
+                title={`${pair.a.name} & ${pair.b.name}`}
+                subtitle={`${pair.a.level} & ${pair.b.level} · always on the same team`}
+                accessory={<><LevelBadge level={pair.a.level} />{pair.b.level !== pair.a.level ? <LevelBadge level={pair.b.level} /> : null}</>}
+                trailing={<Button title="Unlink" variant="plainDestructive" size="sm" onPress={() => unlink(pair)} />}
+              />
+            ))
+          )}
+        </List>
+      </Section>
+
+      <Section title="Current queue" count={waitingList.length}>
+        <List>
+          {sortedQueue.length === 0 ? (
+            <EmptyText>The queue is empty.</EmptyText>
+          ) : (
+            sortedQueue.map((q, i) => {
+              const wait = Math.floor(minutesSince(q.waiting_since, now));
+              const games = `${q.games_played} ${q.games_played === 1 ? 'game' : 'games'}`;
+              const status = `${q.status === 'playing' ? 'Playing' : q.status === 'paused' ? 'Paused' : `Waiting ${wait} min`} · ${games}`;
+              return (
+                <ListRow
+                  key={q.entry_id}
+                  last={i === sortedQueue.length - 1}
+                  dimmed={q.status === 'playing'}
+                  leading={<Avatar name={q.name} level={q.level} />}
+                  title={q.name}
+                  level={q.level}
+                  subtitle={withPartner(q.player_id, status)}
+                  trailing={
+                    q.status === 'playing' ? (
+                      <Badge text="On court" tone="success" />
+                    ) : (
+                      <>
+                        {q.status === 'paused' ? <Badge text="Paused" tone="warning" /> : null}
+                        <Button title={q.status === 'paused' ? 'Resume' : 'Pause'} variant="plain" size="sm" onPress={() => togglePause(q)} />
+                        <Button title="Remove" variant="plainDestructive" size="sm" onPress={() => remove(q.entry_id)} />
+                      </>
+                    )
+                  }
+                />
+              );
+            })
+          )}
+        </List>
+      </Section>
+
+      <Section title="Add players" count={filteredAvailable.length}>
+        <TextField placeholder="Search by name" value={search} onChangeText={setSearch} autoCorrect={false} clearButtonMode="while-editing" />
+        <Segmented options={levelOptions(FILTER_LEVELS, C.dark)} value={levelFilter} onChange={setLevelFilter} />
+        {filteredAvailable.length > 0 && (
+          <View style={styles.toolbar}>
+            <Pressable style={styles.selectAll} onPress={toggleAddAll} hitSlop={6}>
+              <Checkbox checked={allVisibleSelected} />
+              <Text style={{ color: C.text, fontSize: 15 }}>Select all</Text>
+            </Pressable>
+            <Button title={visibleSel.length ? `Add selected (${visibleSel.length})` : 'Add selected'} size="sm" onPress={addSelected} disabled={!visibleSel.length} />
+          </View>
         )}
-      </View>
+        <List>
+          {filteredAvailable.length === 0 ? (
+            <EmptyText>{available.length === 0 ? 'Everyone is already in the queue, or no players exist yet. Add players in Admin.' : 'No players match.'}</EmptyText>
+          ) : (
+            filteredAvailable.map((p, i) => (
+              <ListRow
+                key={p.player_id}
+                last={i === filteredAvailable.length - 1}
+                onPress={() => toggleAddSel(p.player_id)}
+                leading={<><Checkbox checked={addSel.includes(p.player_id)} /><Avatar name={p.name} level={p.level} /></>}
+                title={p.name}
+                level={p.level}
+                subtitle={withPartner(p.player_id, '')}
+                trailing={<Button title={pairs[p.player_id] != null ? 'Add both' : 'Add'} variant="secondary" size="sm" onPress={() => add(p.player_id)} />}
+              />
+            ))
+          )}
+        </List>
+      </Section>
 
-      {/* ---------- Custom Match / Edit Group modal ---------- */}
-      <Modal visible={customOpen} transparent animationType="fade" onRequestClose={() => setCustomOpen(false)}>
-        <View style={styles.backdrop}>
-          <View style={styles.modal}>
-            <Text style={styles.modalTitle}>{editingGroupId != null ? 'Edit Group' : 'Custom Match'}  ({customSel.length}/{need})</Text>
-            <Text style={styles.modalHint}>Pick players. Selecting the first shows today&apos;s rivals.</Text>
+      {/* ---------- Custom match / edit group ---------- */}
+      <Dialog
+        visible={customOpen}
+        onClose={closeCustom}
+        title={`${editingGroupId != null ? 'Edit group' : 'Custom match'} (${customSel.length}/${need})`}
+        subtitle={`Pick ${need} players. The first player you pick shows their rivals from today.`}
+        actions={
+          <>
+            <Button title="Cancel" variant="secondary" onPress={closeCustom} style={{ flex: 1 }} />
+            <Button title={confirmLabel} onPress={confirmCustom} disabled={customSel.length !== need} style={{ flex: 1 }} />
+          </>
+        }
+      >
+        {rivals.length > 0 && (
+          <View style={{ gap: 8 }}>
+            <FieldLabel>Rivals for {anchorName} today</FieldLabel>
+            <List>
+              {rivals.map((r, i) => (
+                <ListRow
+                  key={r.opponent_id}
+                  last={i === rivals.length - 1}
+                  onPress={() => toggleCustom(r.opponent_id)}
+                  leading={<Checkbox checked={customSel.includes(r.opponent_id)} />}
+                  title={r.name}
+                  level={r.level}
+                  subtitle={rivalLabel(r)}
+                />
+              ))}
+            </List>
+          </View>
+        )}
 
-            {rivals.length > 0 && (
-              <View style={styles.rivalBox}>
-                <Text style={styles.rivalHead}>Rivals for {anchorName} today</Text>
-                {rivals.map((r) => {
-                  const picked = customSel.includes(r.opponent_id);
-                  return (
-                    <Pressable key={r.opponent_id} onPress={() => toggleCustom(r.opponent_id)} style={({ pressed }) => [styles.rivalRow, picked && { backgroundColor: C.card2, borderRadius: 12 }, pressed && styles.pressed]}>
-                      <Text style={styles.rivalName}>{r.name}</Text>
-                      <Text style={styles.rivalRec}>{rivalLabel(r)}</Text>
-                      <View style={[styles.pickDot, picked && { backgroundColor: C.lime, borderColor: C.lime }]} />
-                    </Pressable>
-                  );
-                })}
-              </View>
-            )}
-
-            <Text style={styles.rivalHead}>Waiting players (longest wait first)</Text>
-            <TextInput style={styles.modalSearchInput} placeholder="Search by name" placeholderTextColor={C.muted} value={customSearch} onChangeText={setCustomSearch} autoCorrect={false} clearButtonMode="while-editing" />
+        <View style={{ gap: 8 }}>
+          <FieldLabel>Waiting players · longest wait first</FieldLabel>
+          <TextField placeholder="Search by name" value={customSearch} onChangeText={setCustomSearch} autoCorrect={false} clearButtonMode="while-editing" />
+          <List>
             <ScrollView style={{ maxHeight: 240 }}>
               {filteredWaitingForCustom.length === 0 ? (
-                <Text style={styles.empty}>{waitingList.length === 0 ? 'No waiting players.' : 'No players match your search.'}</Text>
+                <EmptyText>{waitingList.length === 0 ? 'No waiting players.' : 'No players match your search.'}</EmptyText>
               ) : (
-                filteredWaitingForCustom.map((p) => {
-                  const picked = customSel.includes(p.player_id);
-                  const wait = Math.floor(minutesSince(p.waiting_since, now));
+                filteredWaitingForCustom.map((p, i) => (
+                  <ListRow
+                    key={p.player_id}
+                    last={i === filteredWaitingForCustom.length - 1}
+                    onPress={() => toggleCustom(p.player_id)}
+                    leading={<Checkbox checked={customSel.includes(p.player_id)} />}
+                    title={p.name}
+                    level={p.level}
+                    subtitle={`Waiting ${Math.floor(minutesSince(p.waiting_since, now))} min`}
+                  />
+                ))
+              )}
+            </ScrollView>
+          </List>
+        </View>
+
+        {editingGroupId == null && (
+          <View style={{ gap: 8 }}>
+            <Segmented options={MODES} value={customMode} onChange={setCustomMode} />
+            {customMode === 'play' && (
+              <>
+                <FieldLabel>Court</FieldLabel>
+                {openCourts.length === 0 ? (
+                  <BodyText>No open courts. Free one first, or use Add to queue.</BodyText>
+                ) : (
+                  <Segmented options={openCourts.map((c) => ({ value: c.court_id, label: c.name }))} value={customCourtId} onChange={setCustomCourtId} />
+                )}
+              </>
+            )}
+          </View>
+        )}
+      </Dialog>
+
+      {/* ---------- Link forced partners ---------- */}
+      <Dialog
+        visible={partnerOpen}
+        onClose={() => setPartnerOpen(false)}
+        title={`Link partners (${partnerSel.length}/2)`}
+        subtitle="Pick two players. They will always queue together and play on the same team."
+        actions={
+          <>
+            <Button title="Cancel" variant="secondary" onPress={() => setPartnerOpen(false)} style={{ flex: 1 }} />
+            <Button title="Link partners" onPress={confirmPartner} disabled={partnerSel.length !== 2} style={{ flex: 1 }} />
+          </>
+        }
+      >
+        <View style={{ gap: 8 }}>
+          <TextField placeholder="Search by name" value={partnerSearch} onChangeText={setPartnerSearch} autoCorrect={false} clearButtonMode="while-editing" />
+          <List>
+            <ScrollView style={{ maxHeight: 300 }}>
+              {filteredPartnerPicks.length === 0 ? (
+                <EmptyText>{allPlayers.length === 0 ? 'No players yet. Add players in Admin.' : 'No players match your search.'}</EmptyText>
+              ) : (
+                filteredPartnerPicks.map((p, i) => {
+                  const mate = partnerName(p.player_id);
                   return (
-                    <Pressable key={p.player_id} onPress={() => toggleCustom(p.player_id)} style={({ pressed }) => [styles.pickRow, pressed && styles.pressed]}>
-                      <View style={[styles.pickDot, picked && { backgroundColor: C.lime, borderColor: C.lime }]} />
-                      <Text style={styles.rowName} numberOfLines={1}>{p.name}</Text>
-                      <Pill text={p.level} kind="neutral" />
-                      <Pill text={`${wait}m`} kind="wait" />
-                    </Pressable>
+                    <ListRow
+                      key={p.player_id}
+                      last={i === filteredPartnerPicks.length - 1}
+                      onPress={() => togglePartnerPick(p.player_id)}
+                      leading={<Checkbox checked={partnerSel.includes(p.player_id)} />}
+                      title={p.name}
+                      level={p.level}
+                      subtitle={mate ? `Partnered with ${mate}` : undefined}
+                    />
                   );
                 })
               )}
             </ScrollView>
+          </List>
+        </View>
+      </Dialog>
 
-            {editingGroupId == null && (
-              <>
-                <View style={styles.modeRow}>
-                  <Pressable onPress={() => setCustomMode('queue')} style={({ pressed }) => [styles.modePill, customMode === 'queue' && styles.modePillOn, pressed && styles.pressed]}>
-                    <Text style={[styles.modeText, customMode === 'queue' && styles.modeTextOn]}>Add to Queue</Text>
-                  </Pressable>
-                  <Pressable onPress={() => setCustomMode('play')} style={({ pressed }) => [styles.modePill, customMode === 'play' && styles.modePillOn, pressed && styles.pressed]}>
-                    <Text style={[styles.modeText, customMode === 'play' && styles.modeTextOn]}>Play Now</Text>
-                  </Pressable>
-                </View>
+      {/* ---------- Swap a player in a live match ---------- */}
+      <Dialog
+        visible={swapMatch !== null}
+        onClose={closeSwap}
+        title={`Edit players${swapMatch ? ` · ${swapMatch.court_name}` : ''}`}
+        subtitle={swapOutId == null ? 'Choose the player to replace.' : 'Now choose who comes in.'}
+        actions={<Button title="Done" variant="secondary" onPress={closeSwap} style={{ flex: 1 }} />}
+      >
+        {swapMatch && (
+          <List>
+            {[...swapMatch.team1.map((p) => ({ ...p, team: 1 })), ...swapMatch.team2.map((p) => ({ ...p, team: 2 }))].map((p, i, arr) => (
+              <ListRow
+                key={p.player_id}
+                last={i === arr.length - 1}
+                onPress={() => setSwapOutId(p.player_id)}
+                leading={<Checkbox checked={swapOutId === p.player_id} />}
+                title={p.name}
+                subtitle={`Team ${p.team}`}
+              />
+            ))}
+          </List>
+        )}
 
-                {customMode === 'play' && (
-                  <>
-                    <Text style={styles.rivalHead}>Choose a court</Text>
-                    {openCourts.length === 0 ? (
-                      <Text style={styles.empty}>No open courts. Free one first or use Add to Queue.</Text>
-                    ) : (
-                      <View style={styles.courtChips}>
-                        {openCourts.map((c) => (
-                          <Pressable key={c.court_id} onPress={() => setCustomCourtId(c.court_id)} style={({ pressed }) => [styles.courtChip, customCourtId === c.court_id && styles.courtChipOn, pressed && styles.pressed]}>
-                            <Text style={[styles.courtChipText, customCourtId === c.court_id && styles.courtChipTextOn]}>{c.name}</Text>
-                          </Pressable>
-                        ))}
-                      </View>
-                    )}
-                  </>
+        {swapOutId != null && (
+          <View style={{ gap: 8 }}>
+            <FieldLabel>Bring in</FieldLabel>
+            <TextField placeholder="Search by name" value={swapSearch} onChangeText={setSwapSearch} autoCorrect={false} clearButtonMode="while-editing" />
+            <List>
+              <ScrollView style={{ maxHeight: 240 }}>
+                {filteredSwapCandidates.length === 0 ? (
+                  <EmptyText>{swapCandidates.length === 0 ? 'No bench players available.' : 'No players match your search.'}</EmptyText>
+                ) : (
+                  filteredSwapCandidates.map((p, i) => (
+                    <ListRow
+                      key={p.player_id}
+                      last={i === filteredSwapCandidates.length - 1}
+                      onPress={() => doSwap(p.player_id)}
+                      leading={<Avatar name={p.name} />}
+                      title={p.name}
+                      level={p.level}
+                      trailing={<Button title="Swap in" variant="secondary" size="sm" onPress={() => doSwap(p.player_id)} />}
+                    />
+                  ))
                 )}
-              </>
-            )}
-
-            <View style={styles.modalBtns}>
-              <Pressable onPress={() => { setCustomOpen(false); setEditingGroupId(null); }} style={({ pressed }) => [styles.mBtn, { backgroundColor: C.card2 }, pressed && styles.pressed]}><Text style={[styles.mBtnText, { color: C.text }]}>Cancel</Text></Pressable>
-              <Pressable onPress={confirmCustom} style={({ pressed }) => [styles.mBtn, { backgroundColor: customSel.length === need ? C.lime : C.card2 }, pressed && styles.pressed]}>
-                <Text style={[styles.mBtnText, { color: customSel.length === need ? C.onLime : C.muted }]}>
-                  {editingGroupId != null ? 'Save Group' : customMode === 'play' ? 'Play Now' : 'Add to Queue'}
-                </Text>
-              </Pressable>
-            </View>
+              </ScrollView>
+            </List>
           </View>
-        </View>
-      </Modal>
-
-      {/* ---------- Live match swap modal ---------- */}
-      <Modal visible={swapMatch !== null} transparent animationType="fade" onRequestClose={() => setSwapMatch(null)}>
-        <View style={styles.backdrop}>
-          <View style={styles.modal}>
-            <Text style={styles.modalTitle}>Edit Match{swapMatch ? `  ${swapMatch.court_name}` : ''}</Text>
-            <Text style={styles.modalHint}>{swapOutId == null ? 'Tap the player to replace.' : 'Now tap the player to bring in.'}</Text>
-
-            {swapMatch && (
-              <View style={styles.rivalBox}>
-                {[...swapMatch.team1.map((p) => ({ ...p, team: 1 })), ...swapMatch.team2.map((p) => ({ ...p, team: 2 }))].map((p) => (
-                  <Pressable key={p.player_id} onPress={() => setSwapOutId(p.player_id)} style={({ pressed }) => [styles.rivalRow, swapOutId === p.player_id && { backgroundColor: C.red, borderRadius: 12 }, pressed && styles.pressed]}>
-                    <Text style={[styles.rivalName, swapOutId === p.player_id && { color: '#fff' }]}>{p.name}</Text>
-                    <Text style={[styles.rivalRec, swapOutId === p.player_id && { color: '#fff' }]}>Team {p.team}</Text>
-                  </Pressable>
-                ))}
-              </View>
-            )}
-
-            {swapOutId != null && (
-              <>
-                <Text style={styles.rivalHead}>Bring in</Text>
-                <TextInput
-                  style={styles.modalSearchInput}
-                  placeholder="Search by name"
-                  placeholderTextColor={C.muted}
-                  value={swapSearch}
-                  onChangeText={setSwapSearch}
-                  autoCorrect={false}
-                  clearButtonMode="while-editing"
-                />
-                <ScrollView style={{ maxHeight: 240 }}>
-                  {filteredSwapCandidates.length === 0 ? (
-                    <Text style={styles.empty}>{swapCandidates.length === 0 ? 'No bench players available.' : 'No players match your search.'}</Text>
-                  ) : (
-                    filteredSwapCandidates.map((p) => (
-                      <Pressable key={p.player_id} onPress={() => doSwap(p.player_id)} style={({ pressed }) => [styles.pickRow, pressed && styles.pressed]}>
-                        <Text style={styles.rowName} numberOfLines={1}>{p.name}</Text>
-                        <Pill text={p.level} kind="neutral" />
-                        <View style={styles.addTag}><Text style={styles.addTagText}>Swap in</Text></View>
-                      </Pressable>
-                    ))
-                  )}
-                </ScrollView>
-              </>
-            )}
-
-            <View style={styles.modalBtns}>
-              <Pressable onPress={() => { setSwapMatch(null); setSwapOutId(null); setSwapSearch(''); }} style={({ pressed }) => [styles.mBtn, { backgroundColor: C.card2 }, pressed && styles.pressed]}><Text style={[styles.mBtnText, { color: C.text }]}>Done</Text></Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
-    </ScrollView>
+        )}
+      </Dialog>
+    </Screen>
   );
 }
 
-const makeStyles = (C: Palette) => StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.bg },
-  h1: { fontSize: 30, fontWeight: '800', color: C.text, marginBottom: 16 },
-  h2: { fontSize: 20, fontWeight: '700', color: C.text },
-  headRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 24, marginBottom: 12 },
-  count: { fontSize: 14, color: C.muted, fontWeight: '600' },
-  label: { fontSize: 14, color: C.muted, fontWeight: '600', marginBottom: 10 },
-  input: { backgroundColor: C.card2, borderRadius: 14, paddingVertical: 13, paddingHorizontal: 16, fontSize: 15, color: C.text },
-  segWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 12, marginBottom: 14 },
-  segPill: { backgroundColor: C.card2, borderRadius: 999, paddingVertical: 9, paddingHorizontal: 16 },
-  segPillOn: { backgroundColor: C.lime },
-  segText: { fontSize: 13, color: C.muted, fontWeight: '600' },
-  segTextOn: { color: C.onLime },
-  card: { backgroundColor: C.card, borderRadius: 24, paddingHorizontal: 6, paddingVertical: 4 },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 13, paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: C.line },
-  rowName: { flex: 1, fontSize: 16, color: C.text, fontWeight: '500' },
-  addTag: { backgroundColor: C.lime, borderRadius: 999, paddingVertical: 6, paddingHorizontal: 14 },
-  addTagText: { color: C.onLime, fontWeight: '800', fontSize: 13 },
-  autoBtn: { backgroundColor: C.lime, borderRadius: 18, paddingVertical: 17, alignItems: 'center', marginTop: 22 },
-  autoBtnText: { color: C.onLime, fontWeight: '800', fontSize: 17 },
-  customBtn: { backgroundColor: C.blue, borderRadius: 16, paddingVertical: 14, alignItems: 'center', marginTop: 10 },
-  customBtnText: { color: '#fff', fontWeight: '800', fontSize: 15 },
-  groupCard: { backgroundColor: C.card, borderRadius: 18, padding: 14, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 10 },
-  groupMembers: { flex: 1, fontSize: 15, color: C.text, fontWeight: '600' },
-  groupBtns: { flexDirection: 'row', gap: 8 },
-  matchCard: { backgroundColor: C.blue, borderRadius: 22, padding: 16, marginBottom: 10 },
-  matchHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
-  courtName: { fontSize: 16, fontWeight: '700', color: '#fff' },
-  editChip: { backgroundColor: 'rgba(255,255,255,0.25)', borderRadius: 999, paddingVertical: 4, paddingHorizontal: 12 },
-  editChipText: { color: '#fff', fontWeight: '700', fontSize: 12 },
-  teamLine: { fontSize: 17, fontWeight: '700', color: '#fff', textAlign: 'center' },
-  vs: { fontSize: 12, color: '#dbe0ff', textAlign: 'center', marginVertical: 2 },
-  winRow: { flexDirection: 'row', gap: 10, marginTop: 12 },
-  winBtn: { flex: 1, borderRadius: 14, paddingVertical: 12, alignItems: 'center' },
-  winBtnText: { fontWeight: '800', fontSize: 14 },
-  miniBtn: { borderRadius: 999, paddingVertical: 7, paddingHorizontal: 12 },
-  miniText: { color: '#241a00', fontWeight: '700', fontSize: 12 },
-  empty: { color: C.muted, padding: 20, textAlign: 'center' },
-  pressed: { opacity: 0.7 },
-  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: 20 },
-  modal: { backgroundColor: C.card, borderRadius: 24, padding: 18 },
-  modalTitle: { fontSize: 19, fontWeight: '800', color: C.text },
-  modalHint: { fontSize: 12, color: C.muted, marginTop: 4, marginBottom: 12 },
-  modalSearchInput: { backgroundColor: C.card2, borderRadius: 14, paddingVertical: 10, paddingHorizontal: 14, fontSize: 14, color: C.text, marginBottom: 8 },
-  rivalBox: { backgroundColor: C.card2, borderRadius: 16, padding: 10, marginBottom: 12 },
-  rivalHead: { fontSize: 13, fontWeight: '700', color: C.muted, marginBottom: 6, marginTop: 4 },
-  rivalRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 9, paddingHorizontal: 8 },
-  rivalName: { fontSize: 15, color: C.text, fontWeight: '600', flex: 1 },
-  rivalRec: { fontSize: 12, color: C.lime, fontWeight: '700' },
-  pickRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 11, paddingHorizontal: 6, borderBottomWidth: 1, borderBottomColor: C.line },
-  pickDot: { width: 20, height: 20, borderRadius: 6, borderWidth: 2, borderColor: C.muted },
-  modeRow: { flexDirection: 'row', gap: 8, marginTop: 12 },
-  modePill: { flex: 1, backgroundColor: C.card2, borderRadius: 999, paddingVertical: 10, alignItems: 'center' },
-  modePillOn: { backgroundColor: C.lime },
-  modeText: { fontSize: 13, color: C.muted, fontWeight: '700' },
-  modeTextOn: { color: C.onLime },
-  courtChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 4 },
-  courtChip: { backgroundColor: C.card2, borderRadius: 999, paddingVertical: 8, paddingHorizontal: 16 },
-  courtChipOn: { backgroundColor: C.blue },
-  courtChipText: { fontSize: 13, color: C.muted, fontWeight: '700' },
-  courtChipTextOn: { color: '#fff' },
-  modalBtns: { flexDirection: 'row', gap: 10, marginTop: 14 },
-  mBtn: { flex: 1, borderRadius: 14, paddingVertical: 13, alignItems: 'center' },
-  mBtnText: { fontWeight: '800', fontSize: 15 },
+const styles = StyleSheet.create({
+  actions: { flexDirection: 'row', gap: 10 },
+  toolbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 4 },
+  selectAll: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  matchHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  courtName: { fontSize: 17, fontWeight: '700' },
+  teams: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, borderTopWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth },
+  team: { flex: 1, fontSize: 15, fontWeight: '600' },
 });

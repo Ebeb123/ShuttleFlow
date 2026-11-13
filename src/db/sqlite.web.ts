@@ -6,9 +6,10 @@
 // same API (openDatabaseSync / openDatabaseAsync and the *Sync / *Async
 // methods the app calls), backed by sql.js — real SQLite compiled to
 // WebAssembly, loaded from /public. Data is saved in the visitor's browser
-// (localStorage), so every visitor gets their own private copy of the demo.
+// (localStorage) on this device.
 // ---------------------------------------------------------------------------
 
+// Key name kept from earlier builds so data already saved in this browser still loads.
 const STORAGE_PREFIX = 'demo-sqlite:';
 let SQL = null;
 let loading = null;
@@ -75,7 +76,7 @@ function saveNow(name) {
   try {
     window.localStorage.setItem(STORAGE_PREFIX + name, toBase64(db.export()));
   } catch (e) {
-    console.warn('[demo] could not save data in this browser:', e && e.message);
+    console.warn('[db] could not save data in this browser:', e && e.message);
   }
   try { db.exec('PRAGMA foreign_keys = ON;'); } catch (e) { /* export() resets pragmas */ }
 }
@@ -198,11 +199,6 @@ export async function openDatabaseAsync(name) {
   return makeDatabase(name);
 }
 
-/** Wipes the saved demo data in this browser (used by the "Reset demo" button). */
-export function resetDatabase(name) {
-  try { window.localStorage.removeItem(STORAGE_PREFIX + name); } catch (e) { /* ignore */ }
-  if (open[name]) { try { open[name].close(); } catch (e) { /* ignore */ } delete open[name]; }
-}
 
 export function saveDatabaseNow(name) {
   saveNow(name);

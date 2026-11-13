@@ -18,6 +18,8 @@ export const DEFAULT_CONFIG: MatchConfig = {
 };
 
 export type PartnerMap = Record<number, number[]>;
+/** Forced partners: player_id -> partner_id (both directions). */
+export type PairMap = Record<number, number>;
 
 const LEVEL_ORDER: Level[] = ['Beginner', 'Intermediate', 'Advance', 'Pro'];
 
@@ -81,33 +83,51 @@ function orderForAnchor(list: WaitingPlayer[], anchor: WaitingPlayer, avoid: Set
 export function selectGroup(
   sorted: WaitingPlayer[],
   need: number,
-  recent: PartnerMap = {}
+  recent: PartnerMap = {},
+  pairs: PairMap = {}
 ): WaitingPlayer[] | null {
-  if (sorted.length < need) return null;
-  const anchor = sorted[0]; // longest-waiting player leads the next match
+  // A player with a forced partner only plays when that partner is available too.
+  const ids = new Set(sorted.map((p) => p.player_id));
+  const pool = sorted.filter((p) => pairs[p.player_id] == null || ids.has(pairs[p.player_id]));
+  if (pool.length < need) return null;
+  const byId = new Map(pool.map((p) => [p.player_id, p]));
+
+  // Candidates in priority order: the anchor (longest wait), their custom group,
+  // then same level by closeness of today's wins, then the nearest levels.
+  const anchor = pool[0];
   const avoid = new Set(recent[anchor.player_id] ?? []);
-  const group = [anchor];
-
-  // Custom-group cohesion: keep a manually-grouped set together.
-  if (anchor.group_id != null) {
-    for (const p of sorted) {
-      if (p !== anchor && p.group_id === anchor.group_id) {
-        group.push(p);
-        if (group.length === need) return group;
-      }
-    }
-  }
-
-  // Same level first, ordered by closeness of TODAY's wins to the anchor.
-  const sameLevel = orderForAnchor(sorted.filter((p) => p.level === anchor.level && !group.includes(p)), anchor, avoid);
-  for (const p of sameLevel) { group.push(p); if (group.length === need) return group; }
-
-  // Spillover to nearest levels only when short, same win-closeness ordering.
+  const order: WaitingPlayer[] = [anchor];
+  if (anchor.group_id != null) order.push(...pool.filter((p) => p !== anchor && p.group_id === anchor.group_id));
+  order.push(...orderForAnchor(pool.filter((p) => p.level === anchor.level && !order.includes(p)), anchor, avoid));
   for (const lvl of tiersByDistanceFrom(anchor.level)) {
-    const tier = orderForAnchor(sorted.filter((p) => p.level === lvl && !group.includes(p)), anchor, avoid);
-    for (const p of tier) { group.push(p); if (group.length === need) return group; }
+    order.push(...orderForAnchor(pool.filter((p) => p.level === lvl && !order.includes(p)), anchor, avoid));
   }
-  return group.length === need ? group : null;
+
+  // Forced partners become one unit of two.
+  const units: WaitingPlayer[][] = [];
+  const seen = new Set<number>();
+  for (const p of order) {
+    if (seen.has(p.player_id)) continue;
+    const mateId = pairs[p.player_id];
+    const mate = mateId != null ? byId.get(mateId) : undefined;
+    const unit = mate && !seen.has(mate.player_id) ? [p, mate] : [p];
+    unit.forEach((x) => seen.add(x.player_id));
+    units.push(unit);
+  }
+
+  // First combination (in priority order) that fills the match exactly and includes the anchor.
+  const pick = (i: number, size: number, chosen: WaitingPlayer[][]): WaitingPlayer[][] | null => {
+    if (size === need) return chosen;
+    if (i >= units.length) return null;
+    if (size + units[i].length <= need) {
+      const r = pick(i + 1, size + units[i].length, [...chosen, units[i]]);
+      if (r) return r;
+    }
+    return pick(i + 1, size, chosen);
+  };
+  if (units[0].length > need) return null;
+  const res = pick(1, units[0].length, [units[0]]);
+  return res ? res.flat() : null;
 }
 
 function avgWinRate(team: WaitingPlayer[]): number {
@@ -122,14 +142,22 @@ function repeatPairs(t1: WaitingPlayer[], t2: WaitingPlayer[], partners: Partner
   return c;
 }
 
-export function balanceTeams(group: WaitingPlayer[], partners: PartnerMap = {}): { team1: WaitingPlayer[]; team2: WaitingPlayer[] } {
+export function balanceTeams(group: WaitingPlayer[], partners: PartnerMap = {}, pairs: PairMap = {}): { team1: WaitingPlayer[]; team2: WaitingPlayer[] } {
   if (group.length === 2) return { team1: [group[0]], team2: [group[1]] };
   const [a, b, c, d] = group;
-  const splits: [WaitingPlayer[], WaitingPlayer[]][] = [
+  const all: [WaitingPlayer[], WaitingPlayer[]][] = [
     [[a, b], [c, d]],
     [[a, c], [b, d]],
     [[a, d], [b, c]],
   ];
+  // Forced partners must end up on the same team.
+  const keepsPairs = ([t1, t2]: [WaitingPlayer[], WaitingPlayer[]]) =>
+    [t1, t2].every((team) => team.every((p) => {
+      const mate = pairs[p.player_id];
+      return mate == null || !group.some((x) => x.player_id === mate) || team.some((x) => x.player_id === mate);
+    }));
+  const valid = all.filter(keepsPairs);
+  const splits = valid.length ? valid : all;
   let best = splits[0];
   let bestRep = Infinity;
   let bestDiff = Infinity;
@@ -152,16 +180,19 @@ export function planAutoQueue(
   openCourtCount: number,
   now: Date,
   cfg: MatchConfig = DEFAULT_CONFIG,
-  recent: PartnerMap = {}
+  recent: PartnerMap = {},
+  pairs: PairMap = {}
 ): MatchPlan[] {
+  // Forced partners only make sense in doubles.
+  if (cfg.playersPerMatch < 4) pairs = {};
   const eligible = pool.filter((p) => isRested(p, now, cfg.minRestMin));
   let sorted = sortByPriority(eligible, now, cfg);
   const plans: MatchPlan[] = [];
   for (let court = 0; court < openCourtCount; court++) {
     if (sorted.length < cfg.playersPerMatch) break;
-    const group = selectGroup(sorted, cfg.playersPerMatch, recent);
+    const group = selectGroup(sorted, cfg.playersPerMatch, recent, pairs);
     if (!group) break;
-    plans.push(balanceTeams(group, recent));
+    plans.push(balanceTeams(group, recent, pairs));
     const chosen = new Set(group.map((p) => p.player_id));
     sorted = sorted.filter((p) => !chosen.has(p.player_id));
   }
@@ -173,9 +204,10 @@ export function previewNextUp(
   now: Date,
   cfg: MatchConfig = DEFAULT_CONFIG,
   recent: PartnerMap = {},
-  openCourtCount = 1
+  openCourtCount = 1,
+  pairs: PairMap = {}
 ): WaitingPlayer[] {
-  const plans = planAutoQueue(pool, Math.max(1, openCourtCount), now, cfg, recent);
+  const plans = planAutoQueue(pool, Math.max(1, openCourtCount), now, cfg, recent, pairs);
   if (plans.length === 0) return [];
   return [...plans[0].team1, ...plans[0].team2];
 }

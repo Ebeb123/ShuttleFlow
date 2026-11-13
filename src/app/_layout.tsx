@@ -1,6 +1,6 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { ActivityIndicator, Platform, Text, View, useColorScheme } from 'react-native';
+import { ActivityIndicator, Text, View, useColorScheme } from 'react-native';
 import { useEffect, useState } from 'react';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
@@ -8,7 +8,6 @@ import AppTabs from '@/components/app-tabs';
 
 import { initDatabase } from '../db/db';
 import { prepareDatabase } from '../db/sqlite';
-import { seedDemoIfEmpty } from '../db/demo';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -23,7 +22,6 @@ export default function TabLayout() {
     prepareDatabase()
       .then(() => {
         initDatabase();
-        if (Platform.OS === 'web') seedDemoIfEmpty(); // portfolio web demo only
         if (!cancelled) setReady(true);
       })
       .catch((e) => {
@@ -43,8 +41,8 @@ export default function TabLayout() {
   }
   if (!ready) {
     return (
-      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colorScheme === 'dark' ? '#141416' : '#f2f3f5' }}>
-        <ActivityIndicator color="#4d7c0f" size="large" />
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colorScheme === 'dark' ? '#0f1626' : '#eef3f6' }}>
+        <ActivityIndicator color="#548994" size="large" />
       </View>
     );
   }

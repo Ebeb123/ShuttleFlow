@@ -5,9 +5,9 @@ export default function AppTabs() {
   const dark = useColorScheme() === 'dark';
   return (
     <NativeTabs
-      backgroundColor={dark ? '#1b1b1e' : '#ffffff'}
-      indicatorColor="#c9f24e"
-      labelStyle={{ color: dark ? '#9a9aa3' : '#6b6b74', selected: { color: dark ? '#c9f24e' : '#4d7c0f' } }}>
+      backgroundColor={dark ? '#141e33' : '#f4f8fa'}
+      indicatorColor={dark ? 'rgba(125,188,201,0.2)' : 'rgba(84,137,148,0.18)'}
+      labelStyle={{ color: dark ? '#94a2b6' : '#5b6a80', selected: { color: dark ? '#7dbcc9' : '#273555' } }}>
       <NativeTabs.Trigger name="index">
         <NativeTabs.Trigger.Label>Admin</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon md="admin_panel_settings" />

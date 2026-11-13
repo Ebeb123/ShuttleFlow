@@ -1,16 +1,18 @@
 import { useCallback, useMemo, useState } from 'react';
-import { View, Text, TextInput, Pressable, StyleSheet, ScrollView, Modal } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Alert } from '../lib/alert';
 import { useFocusEffect } from 'expo-router';
 
 import { addPlayer, getPlayerStats, updatePlayer, deletePlayer, deletePlayers, LEVELS, type Level, type PlayerStats } from '../db/db';
-import { useColors, type Palette } from '../theme';
+import { useColors } from '../theme';
+import { Button, Card, Checkbox, Dialog, EmptyText, FieldLabel, List, ListRow, Screen, Section, Segmented, TextField, levelOptions } from '../components/ui/kit';
 
 type SortMode = 'name' | 'wins';
+const SORT_OPTIONS: { value: SortMode; label: string }[] = [{ value: 'wins', label: 'Most wins' }, { value: 'name', label: 'A–Z' }];
 
 export default function AdminScreen() {
   const C = useColors();
-  const styles = useMemo(() => makeStyles(C), [C]);
+  const LEVEL_OPTIONS = levelOptions(LEVELS, C.dark);
 
   const [name, setName] = useState('');
   const [selectedLevel, setSelectedLevel] = useState<Level>('Beginner');
@@ -29,9 +31,7 @@ export default function AdminScreen() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const base = q === '' ? players : players.filter((p) => p.name.toLowerCase().includes(q));
-    if (sortMode === 'name') {
-      return [...base].sort((a, b) => a.name.localeCompare(b.name));
-    }
+    if (sortMode === 'name') return [...base].sort((a, b) => a.name.localeCompare(b.name));
     return base; // getPlayerStats already orders by wins
   }, [players, search, sortMode]);
 
@@ -42,7 +42,7 @@ export default function AdminScreen() {
   function toggleSelectAll() { setSelected(allSelected ? [] : filtered.map((p) => p.player_id)); }
   function deleteSelected() {
     if (!selected.length) return;
-    Alert.alert('Delete selected players', `Remove ${selected.length} player(s)? This cannot be undone.`, [
+    Alert.alert('Delete players', `Remove ${selected.length} player(s)? This can't be undone.`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Delete', style: 'destructive', onPress: () => {
           const r = deletePlayers(selected); setSelected([]); refresh();
@@ -64,144 +64,89 @@ export default function AdminScreen() {
     ]);
   }
 
-  const LevelSelector = ({ value, onChange }: { value: Level; onChange: (l: Level) => void }) => (
-    <View style={styles.segWrap}>
-      {LEVELS.map((l) => (
-        <Pressable key={l} onPress={() => onChange(l)} style={({ pressed }) => [styles.segPill, value === l && styles.segPillOn, pressed && styles.pressed]}>
-          <Text style={[styles.segText, value === l && styles.segTextOn]}>{l}</Text>
-        </Pressable>
-      ))}
-    </View>
-  );
+  const ranked = sortMode === 'wins' && search.trim() === '';
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={{ padding: 20, paddingBottom: 48 }}>
-      <Text style={styles.h1}>Players</Text>
+    <Screen title="Players" subtitle={`${players.length} registered`}>
+      <Section title="Add player">
+        <Card>
+          <FieldLabel>Name</FieldLabel>
+          <TextField placeholder="Player name" value={name} onChangeText={setName} onSubmitEditing={handleAdd} returnKeyType="done" />
+          <FieldLabel>Level</FieldLabel>
+          <Segmented options={LEVEL_OPTIONS} value={selectedLevel} onChange={setSelectedLevel} />
+          <Button title="Add player" onPress={handleAdd} disabled={!name.trim()} />
+        </Card>
+      </Section>
 
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Add Player</Text>
-        <TextInput style={styles.input} placeholder="Player name" placeholderTextColor={C.muted} value={name} onChangeText={setName} />
-        <LevelSelector value={selectedLevel} onChange={setSelectedLevel} />
-        <Pressable onPress={handleAdd} style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed]}>
-          <Text style={styles.primaryBtnText}>Add Player</Text>
-        </Pressable>
-      </View>
+      <Section title="Leaderboard" count={filtered.length}>
+        <TextField placeholder="Search by name" value={search} onChangeText={setSearch} autoCorrect={false} clearButtonMode="while-editing" />
+        <Segmented options={SORT_OPTIONS} value={sortMode} onChange={setSortMode} />
 
-      <View style={styles.headRow}>
-        <Text style={styles.h2}>Leaderboard</Text>
-        <Text style={styles.count}>{filtered.length}</Text>
-      </View>
-
-      <View style={styles.sortRow}>
-        <Pressable onPress={() => setSortMode('wins')} style={({ pressed }) => [styles.sortPill, sortMode === 'wins' && styles.sortPillOn, pressed && styles.pressed]}>
-          <Text style={[styles.sortText, sortMode === 'wins' && styles.sortTextOn]}>Most Wins</Text>
-        </Pressable>
-        <Pressable onPress={() => setSortMode('name')} style={({ pressed }) => [styles.sortPill, sortMode === 'name' && styles.sortPillOn, pressed && styles.pressed]}>
-          <Text style={[styles.sortText, sortMode === 'name' && styles.sortTextOn]}>A - Z</Text>
-        </Pressable>
-      </View>
-
-      <TextInput style={styles.input} placeholder="Search by name" placeholderTextColor={C.muted} value={search} onChangeText={setSearch} autoCorrect={false} clearButtonMode="while-editing" />
-
-      <View style={styles.toolbar}>
-        <Pressable style={styles.selectAll} onPress={toggleSelectAll}>
-          <View style={[styles.checkbox, allSelected && styles.checkboxOn]} />
-          <Text style={styles.selectAllText}>Select all</Text>
-        </Pressable>
-        <Pressable onPress={deleteSelected} disabled={!selected.length} style={({ pressed }) => [styles.delBtn, !selected.length && styles.delBtnOff, pressed && selected.length > 0 && styles.pressed]}>
-          <Text style={[styles.delBtnText, !selected.length && { color: C.muted }]}>Delete ({selected.length})</Text>
-        </Pressable>
-      </View>
-
-      <View style={styles.list}>
-        {filtered.length === 0 ? (
-          <Text style={styles.empty}>No players found.</Text>
-        ) : (
-          filtered.map((p, i) => {
-            const sel = selected.includes(p.player_id);
-            const rank = sortMode === 'wins' && search.trim() === '' ? i + 1 : null;
-            return (
-              <Pressable key={p.player_id} onPress={() => toggleSelect(p.player_id)} style={({ pressed }) => [styles.row, pressed && styles.pressed]}>
-                <View style={[styles.checkbox, sel && styles.checkboxOn]} />
-                {rank != null && <Text style={styles.rank}>{rank}</Text>}
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.rowName} numberOfLines={1}>{p.name}</Text>
-                  <Text style={styles.statLine}>
-                    {p.total_wins}W · {p.total_losses}L · {p.games} games · {Math.round(p.win_rate * 100)}%
-                  </Text>
-                </View>
-                <View style={styles.levelPill}><Text style={styles.levelPillText}>{p.level}</Text></View>
-                <Pressable onPress={() => openEdit(p)} hitSlop={6} style={({ pressed }) => [styles.editBtn, pressed && styles.pressed]}>
-                  <Text style={styles.editBtnText}>Edit</Text>
-                </Pressable>
-              </Pressable>
-            );
-          })
-        )}
-      </View>
-
-      <Modal visible={editing !== null} transparent animationType="fade" onRequestClose={() => setEditing(null)}>
-        <View style={styles.backdrop}>
-          <View style={styles.modal}>
-            <Text style={styles.cardTitle}>Edit Player</Text>
-            <TextInput style={styles.input} value={editName} onChangeText={setEditName} placeholderTextColor={C.muted} />
-            <LevelSelector value={editLevel} onChange={setEditLevel} />
-            <View style={styles.modalRow}>
-              <Pressable onPress={confirmDelete} style={({ pressed }) => [styles.mBtn, { backgroundColor: C.red }, pressed && styles.pressed]}><Text style={styles.mBtnText}>Delete</Text></Pressable>
-              <View style={{ flex: 1 }} />
-              <Pressable onPress={() => setEditing(null)} style={({ pressed }) => [styles.mBtn, { backgroundColor: C.card2 }, pressed && styles.pressed]}><Text style={[styles.mBtnText, { color: C.text }]}>Cancel</Text></Pressable>
-              <Pressable onPress={saveEdit} style={({ pressed }) => [styles.mBtn, { backgroundColor: C.lime }, pressed && styles.pressed]}><Text style={[styles.mBtnText, { color: C.onLime }]}>Save</Text></Pressable>
-            </View>
-          </View>
+        <View style={styles.toolbar}>
+          <Pressable style={styles.selectAll} onPress={toggleSelectAll} hitSlop={6}>
+            <Checkbox checked={allSelected} />
+            <Text style={{ color: C.text, fontSize: 15 }}>Select all</Text>
+          </Pressable>
+          <Button
+            title={selected.length ? `Delete (${selected.length})` : 'Delete'}
+            variant="destructiveSoft"
+            size="sm"
+            onPress={deleteSelected}
+            disabled={!selected.length}
+          />
         </View>
-      </Modal>
-    </ScrollView>
+
+        <List>
+          {filtered.length === 0 ? (
+            <EmptyText>No players found.</EmptyText>
+          ) : (
+            filtered.map((p, i) => (
+              <ListRow
+                key={p.player_id}
+                last={i === filtered.length - 1}
+                onPress={() => toggleSelect(p.player_id)}
+                leading={
+                  <>
+                    <Checkbox checked={selected.includes(p.player_id)} />
+                    {ranked ? <Text style={[styles.rank, { color: C.muted }]}>{i + 1}</Text> : null}
+                  </>
+                }
+                title={p.name}
+                level={p.level}
+                subtitle={`${p.total_wins}W ${p.total_losses}L · ${p.games} games · ${Math.round(p.win_rate * 100)}%`}
+                trailing={<Button title="Edit" variant="plain" size="sm" onPress={() => openEdit(p)} />}
+              />
+            ))
+          )}
+        </List>
+      </Section>
+
+      <Dialog
+        visible={editing !== null}
+        onClose={() => setEditing(null)}
+        title="Edit player"
+        actions={
+          <>
+            <Button title="Delete" variant="plainDestructive" onPress={confirmDelete} />
+            <View style={{ flex: 1 }} />
+            <Button title="Cancel" variant="secondary" onPress={() => setEditing(null)} />
+            <Button title="Save" onPress={saveEdit} disabled={!editName.trim()} />
+          </>
+        }
+      >
+        <View style={{ gap: 12 }}>
+          <FieldLabel>Name</FieldLabel>
+          <TextField value={editName} onChangeText={setEditName} />
+          <FieldLabel>Level</FieldLabel>
+          <Segmented options={LEVEL_OPTIONS} value={editLevel} onChange={setEditLevel} />
+        </View>
+      </Dialog>
+    </Screen>
   );
 }
 
-const makeStyles = (C: Palette) => StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.bg },
-  h1: { fontSize: 30, fontWeight: '800', color: C.text, marginBottom: 16 },
-  h2: { fontSize: 20, fontWeight: '700', color: C.text },
-  headRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 24, marginBottom: 12 },
-  count: { fontSize: 14, color: C.muted, fontWeight: '600' },
-  card: { backgroundColor: C.card, borderRadius: 24, padding: 18, gap: 14 },
-  cardTitle: { fontSize: 17, fontWeight: '700', color: C.text },
-  input: { backgroundColor: C.card2, borderRadius: 14, paddingVertical: 13, paddingHorizontal: 16, fontSize: 15, color: C.text },
-  segWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  segPill: { backgroundColor: C.card2, borderRadius: 999, paddingVertical: 9, paddingHorizontal: 16 },
-  segPillOn: { backgroundColor: C.lime },
-  segText: { fontSize: 13, color: C.muted, fontWeight: '600' },
-  segTextOn: { color: C.onLime },
-  primaryBtn: { backgroundColor: C.lime, borderRadius: 16, paddingVertical: 15, alignItems: 'center' },
-  primaryBtnText: { color: C.onLime, fontWeight: '800', fontSize: 16 },
-  sortRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
-  sortPill: { backgroundColor: C.card2, borderRadius: 999, paddingVertical: 8, paddingHorizontal: 16 },
-  sortPillOn: { backgroundColor: C.text },
-  sortText: { fontSize: 13, color: C.muted, fontWeight: '700' },
-  sortTextOn: { color: C.bg },
-  toolbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, marginBottom: 10 },
+const styles = StyleSheet.create({
+  toolbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 4 },
   selectAll: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  selectAllText: { color: C.text, fontSize: 14, fontWeight: '600' },
-  checkbox: { width: 22, height: 22, borderRadius: 7, borderWidth: 2, borderColor: C.muted, backgroundColor: 'transparent' },
-  checkboxOn: { backgroundColor: C.lime, borderColor: C.lime },
-  delBtn: { backgroundColor: C.red, borderRadius: 999, paddingVertical: 9, paddingHorizontal: 16 },
-  delBtnOff: { backgroundColor: C.card2 },
-  delBtnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
-  list: { backgroundColor: C.card, borderRadius: 24, paddingHorizontal: 6, paddingVertical: 4 },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 12, paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: C.line },
-  rank: { fontSize: 14, fontWeight: '800', color: C.lime, width: 22, textAlign: 'center' },
-  rowName: { fontSize: 16, color: C.text, fontWeight: '600' },
-  statLine: { fontSize: 12, color: C.muted, marginTop: 3, fontWeight: '600' },
-  levelPill: { backgroundColor: C.card2, borderRadius: 999, paddingVertical: 4, paddingHorizontal: 11 },
-  levelPillText: { fontSize: 11, fontWeight: '700', color: C.muted },
-  editBtn: { backgroundColor: C.card2, borderRadius: 999, paddingVertical: 6, paddingHorizontal: 14 },
-  editBtnText: { color: C.text, fontWeight: '600', fontSize: 13 },
-  empty: { color: C.muted, padding: 20, textAlign: 'center' },
-  pressed: { opacity: 0.7 },
-  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: 24 },
-  modal: { backgroundColor: C.card, borderRadius: 24, padding: 20, gap: 14 },
-  modalRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  mBtn: { borderRadius: 14, paddingVertical: 12, paddingHorizontal: 18 },
-  mBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  rank: { width: 20, textAlign: 'center', fontSize: 14, fontWeight: '600', fontVariant: ['tabular-nums'] },
 });

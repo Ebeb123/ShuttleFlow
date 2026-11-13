@@ -6,8 +6,4 @@ export * from 'expo-sqlite';
 export function prepareDatabase(): Promise<void> {
   return Promise.resolve();
 }
-
-/** The demo reset button only exists on the web build. */
-export function resetDatabase(_name: string): void {}
-
 export function saveDatabaseNow(_name: string): void {}

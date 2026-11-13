@@ -2,13 +2,12 @@
 
 A queue and court manager for open-play badminton sessions (React Native + Expo + SQLite): add players, check them into the queue, auto-match fair games by level and waiting time, track live courts and win/loss stats.
 
-## Web demo (portfolio)
+## Web version
 
-This app also runs in the browser, so people can try it without installing anything.
+The app also runs in the browser.
 
-- **Live demo:** _add your Vercel link here_
-- In the browser, the app uses the same SQLite schema through [sql.js](https://sql.js.org) (SQLite compiled to WebAssembly, served from `public/`). On phones it still uses `expo-sqlite`, so the mobile app is unchanged.
-- Visitors start with **fictional sample data**. Their changes are saved only in their own browser, and the **Reset** button in the demo bar restores the sample data.
+- In the browser, the app uses the same SQLite schema through [sql.js](https://sql.js.org) (SQLite compiled to WebAssembly, served from `public/`). On phones it uses `expo-sqlite`.
+- The app starts empty. Data is saved in the browser it was entered in (localStorage), so use the same device and browser each session.
 
 Run the web version locally:
 

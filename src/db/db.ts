@@ -131,6 +131,14 @@ export function initDatabase(): void {
     );
   `);
 
+  // Forced partners: stored in both directions so lookups are one query.
+  db.execSync(`
+    CREATE TABLE IF NOT EXISTS forced_partners (
+      player_id  INTEGER PRIMARY KEY REFERENCES players(player_id),
+      partner_id INTEGER NOT NULL REFERENCES players(player_id)
+    );
+  `);
+
   // Safe migration for databases created before group_id existed.
   const qCols = db.getAllSync<{ name: string }>(`PRAGMA table_info(queue_entries)`);
   if (!qCols.some((c) => c.name === 'group_id')) {
@@ -178,7 +186,14 @@ export function getAllPlayers(): Player[] {
 }
 
 // ============================ Queue mutations ============================
+/** Adds a player to the queue. A forced partner is added with them. */
 export function enqueuePlayer(playerId: number): void {
+  enqueueOne(playerId);
+  const mate = getPartnerOf(playerId);
+  if (mate != null) enqueueOne(mate);
+}
+
+function enqueueOne(playerId: number): void {
   const sessionId = getActiveSessionId();
   db.runSync(
     `INSERT INTO queue_entries (session_id, player_id, status, waiting_since)
@@ -190,16 +205,82 @@ export function enqueuePlayer(playerId: number): void {
   );
 }
 
-export function pausePlayer(entryId: number): void {
-  db.runSync(`UPDATE queue_entries SET status = 'paused' WHERE entry_id = ?`, entryId);
+// Pause / resume / leave apply to a forced partner as well (unless they're on court).
+function withPartnerEntries(entryId: number): number[] {
+  const row = db.getFirstSync<{ session_id: number; player_id: number }>(
+    `SELECT session_id, player_id FROM queue_entries WHERE entry_id = ?`, entryId
+  );
+  if (!row) return [entryId];
+  const mate = getPartnerOf(row.player_id);
+  if (mate == null) return [entryId];
+  const m = db.getFirstSync<{ entry_id: number }>(
+    `SELECT entry_id FROM queue_entries WHERE session_id = ? AND player_id = ? AND status IN ('waiting','paused')`,
+    row.session_id, mate
+  );
+  return m ? [entryId, m.entry_id] : [entryId];
 }
 
-export function resumePlayer(entryId: number): void {
-  db.runSync(`UPDATE queue_entries SET status = 'waiting' WHERE entry_id = ?`, entryId);
+function setEntryStatus(entryId: number, status: QueueStatus): void {
+  const ids = withPartnerEntries(entryId);
+  db.withTransactionSync(() => {
+    for (const id of ids) db.runSync(`UPDATE queue_entries SET status = ? WHERE entry_id = ?`, status, id);
+  });
 }
 
-export function leaveQueue(entryId: number): void {
-  db.runSync(`UPDATE queue_entries SET status = 'left' WHERE entry_id = ?`, entryId);
+export function pausePlayer(entryId: number): void { setEntryStatus(entryId, 'paused'); }
+export function resumePlayer(entryId: number): void { setEntryStatus(entryId, 'waiting'); }
+export function leaveQueue(entryId: number): void { setEntryStatus(entryId, 'left'); }
+
+// ============================ Forced partners ============================
+export type PartnerPair = { a: GroupMember; b: GroupMember };
+
+export function getPartnerOf(playerId: number): number | null {
+  const row = db.getFirstSync<{ partner_id: number }>(`SELECT partner_id FROM forced_partners WHERE player_id = ?`, playerId);
+  return row ? row.partner_id : null;
+}
+
+/** player_id -> partner_id, both directions. */
+export function getForcedPartners(): Record<number, number> {
+  const map: Record<number, number> = {};
+  for (const r of db.getAllSync<{ player_id: number; partner_id: number }>(`SELECT player_id, partner_id FROM forced_partners`)) {
+    map[r.player_id] = r.partner_id;
+  }
+  return map;
+}
+
+export function getPartnerPairs(): PartnerPair[] {
+  return db.getAllSync<{ a_id: number; a_name: string; a_level: Level; b_id: number; b_name: string; b_level: Level }>(
+    `SELECT a.player_id AS a_id, a.name AS a_name, a.level AS a_level,
+            b.player_id AS b_id, b.name AS b_name, b.level AS b_level
+     FROM forced_partners f
+     JOIN players a ON a.player_id = f.player_id
+     JOIN players b ON b.player_id = f.partner_id
+     WHERE f.player_id < f.partner_id
+     ORDER BY a.name COLLATE NOCASE`
+  ).map((r) => ({
+    a: { player_id: r.a_id, name: r.a_name, level: r.a_level },
+    b: { player_id: r.b_id, name: r.b_name, level: r.b_level },
+  }));
+}
+
+/** Links two players so they always queue and play on the same team. Replaces any old links. */
+export function setForcedPartners(a: number, b: number): void {
+  if (a === b) return;
+  const sessionId = getActiveSessionId();
+  db.withTransactionSync(() => {
+    db.runSync(`DELETE FROM forced_partners WHERE player_id IN (?, ?) OR partner_id IN (?, ?)`, a, b, a, b);
+    db.runSync(`INSERT INTO forced_partners (player_id, partner_id) VALUES (?, ?), (?, ?)`, a, b, b, a);
+  });
+  // If one of them is already in the queue, bring the other in too.
+  const queued = db.getAllSync<{ player_id: number }>(
+    `SELECT player_id FROM queue_entries WHERE session_id = ? AND player_id IN (?, ?) AND status IN ('waiting','paused','playing')`,
+    sessionId, a, b
+  ).map((r) => r.player_id);
+  if (queued.length === 1) enqueueOne(queued[0] === a ? b : a);
+}
+
+export function removeForcedPartner(playerId: number): void {
+  db.runSync(`DELETE FROM forced_partners WHERE player_id = ? OR partner_id = ?`, playerId, playerId);
 }
 
 // ============================ Queue reads ============================
@@ -280,7 +361,7 @@ export function createMatch(courtId: number, matchType: MatchType, team1: number
 }
 
 // ============================ Active matches + ending ============================
-export type ActiveMatchTeamMember = { player_id: number; name: string };
+export type ActiveMatchTeamMember = { player_id: number; name: string; level: Level };
 export type ActiveMatch = {
   match_id: number;
   court_id: number;
@@ -302,8 +383,8 @@ export function getActiveMatches(): ActiveMatch[] {
   );
 
   return rows.map((m) => {
-    const members = db.getAllSync<{ player_id: number; name: string; team: number }>(
-      `SELECT mp.player_id, p.name, mp.team FROM match_players mp
+    const members = db.getAllSync<{ player_id: number; name: string; level: Level; team: number }>(
+      `SELECT mp.player_id, p.name, p.level, mp.team FROM match_players mp
        JOIN players p ON p.player_id = mp.player_id WHERE mp.match_id = ?`,
       m.match_id
     );
@@ -313,8 +394,8 @@ export function getActiveMatches(): ActiveMatch[] {
       court_name: m.court_name,
       match_type: m.match_type,
       started_at: m.started_at,
-      team1: members.filter((x) => x.team === 1).map(({ player_id, name }) => ({ player_id, name })),
-      team2: members.filter((x) => x.team === 2).map(({ player_id, name }) => ({ player_id, name })),
+      team1: members.filter((x) => x.team === 1).map(({ player_id, name, level }) => ({ player_id, name, level })),
+      team2: members.filter((x) => x.team === 2).map(({ player_id, name, level }) => ({ player_id, name, level })),
     };
   });
 }
@@ -379,23 +460,46 @@ let settingsReady = false;
 function ensureSettings(): void {
   if (settingsReady) return;
   db.execSync(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
-  const defaults: Record<string, string> = {
-    players_per_match: '4', match_type: 'doubles', min_rest_min: '5', match_limit_min: '15',
-  };
+  // rest_min replaces the old, never-used min_rest_min key, so existing installs start at 0 (no change).
+  const defaults: Record<string, string> = { match_type: 'doubles', rest_min: '0', match_limit_min: '15' };
   for (const [k, v] of Object.entries(defaults)) {
     db.runSync(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`, k, v);
   }
   settingsReady = true;
 }
 
-export function getAppConfig(): { matchConfig: MatchConfig; matchLimitMin: number } {
+export type AppSettings = { matchType: MatchType; restMin: number; matchLimitMin: number };
+
+export function getSettings(): AppSettings {
   ensureSettings();
   const rows = db.getAllSync<{ key: string; value: string }>(`SELECT key, value FROM settings`);
   const map: Record<string, string> = {};
   rows.forEach((r) => (map[r.key] = r.value));
+  const int = (v: string | undefined, d: number) => { const n = parseInt(v ?? '', 10); return Number.isFinite(n) ? n : d; };
   return {
-    matchConfig: { playersPerMatch: 4, matchType: 'doubles', wGames: 0, wWait: 1, minRestMin: 0 },
-    matchLimitMin: parseInt(map.match_limit_min ?? '15', 10),
+    matchType: map.match_type === 'singles' ? 'singles' : 'doubles',
+    restMin: Math.max(0, int(map.rest_min, 0)),
+    matchLimitMin: Math.max(1, int(map.match_limit_min, 15)),
+  };
+}
+
+export function saveSettings(next: Partial<AppSettings>): void {
+  if (next.matchType) setSetting('match_type', next.matchType);
+  if (next.restMin != null) setSetting('rest_min', String(next.restMin));
+  if (next.matchLimitMin != null) setSetting('match_limit_min', String(next.matchLimitMin));
+}
+
+export function getAppConfig(): { matchConfig: MatchConfig; matchLimitMin: number } {
+  const st = getSettings();
+  return {
+    matchConfig: {
+      playersPerMatch: st.matchType === 'singles' ? 2 : 4,
+      matchType: st.matchType,
+      wGames: 0,
+      wWait: 1,
+      minRestMin: st.restMin,
+    },
+    matchLimitMin: st.matchLimitMin,
   };
 }
 
@@ -419,6 +523,7 @@ export function deletePlayer(playerId: number): { ok: boolean; reason?: string }
   );
   if (inMatch) return { ok: false, reason: 'This player is in an active match. End the match first.' };
   db.withTransactionSync(() => {
+    db.runSync(`DELETE FROM forced_partners WHERE player_id = ? OR partner_id = ?`, playerId, playerId);
     db.runSync(`DELETE FROM match_players WHERE player_id = ?`, playerId);
     db.runSync(`DELETE FROM queue_entries WHERE player_id = ?`, playerId);
     db.runSync(`DELETE FROM players WHERE player_id = ?`, playerId);
@@ -435,6 +540,7 @@ export function deletePlayers(ids: number[]): { deleted: number; skipped: number
          WHERE mp.player_id = ? AND m.status = 'active' LIMIT 1`, id
       );
       if (inMatch) { skipped++; continue; }
+      db.runSync(`DELETE FROM forced_partners WHERE player_id = ? OR partner_id = ?`, id, id);
       db.runSync(`DELETE FROM match_players WHERE player_id = ?`, id);
       db.runSync(`DELETE FROM queue_entries WHERE player_id = ?`, id);
       db.runSync(`DELETE FROM players WHERE player_id = ?`, id);
@@ -446,6 +552,7 @@ export function deletePlayers(ids: number[]): { deleted: number; skipped: number
 
 export function resetAllData(): void {
   db.withTransactionSync(() => {
+    db.runSync(`DELETE FROM forced_partners`);
     db.runSync(`DELETE FROM match_players`);
     db.runSync(`DELETE FROM matches`);
     db.runSync(`DELETE FROM queue_entries`);
@@ -521,7 +628,7 @@ export function getSessionHeadToHead(playerId: number): Rival[] {
 // ---- Custom group: create ----
 export function enqueueCustomGroup(playerIds: number[]): { averageWaitMin: number } {
   const sessionId = getActiveSessionId();
-  playerIds.forEach((pid) => enqueuePlayer(pid));
+  playerIds.forEach((pid) => enqueueOne(pid));
 
   const placeholders = playerIds.map(() => '?').join(',');
   const rows = db.getAllSync<{ waiting_since: string }>(
@@ -571,7 +678,7 @@ export function getWaitingGroups(): WaitingGroup[] {
 
 export function setCustomGroup(groupId: number, playerIds: number[]): void {
   const sessionId = getActiveSessionId();
-  playerIds.forEach((pid) => enqueuePlayer(pid));
+  playerIds.forEach((pid) => enqueueOne(pid));
 
   const existing = db.getFirstSync<{ waiting_since: string }>(
     `SELECT waiting_since FROM queue_entries WHERE session_id = ? AND group_id = ? LIMIT 1`,

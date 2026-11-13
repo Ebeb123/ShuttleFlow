@@ -1,30 +1,34 @@
-import { useCallback, useMemo, useState } from 'react';
-import { View, Text, Pressable, TextInput, StyleSheet, ScrollView } from 'react-native';
+import { useCallback, useState } from 'react';
+import { StyleSheet, View } from 'react-native';
 import { Alert } from '../lib/alert';
 import { useFocusEffect } from 'expo-router';
 
-import { getCourts, addCourt, setCourtStatus, removeCourt, startNewSession, resetAllData, type Court } from '../db/db';
-import { useColors, type Palette } from '../theme';
+import { getCourts, addCourt, setCourtStatus, removeCourt, startNewSession, resetAllData, getSettings, saveSettings, type Court, type AppSettings } from '../db/db';
+import { useColors } from '../theme';
+import { BodyText, Button, Card, EmptyText, List, ListRow, Screen, Section, Segmented, SettingRow, StatusDot, Stepper, TextField } from '../components/ui/kit';
+
+const STATUS_LABEL: Record<Court['status'], string> = { open: 'Open', occupied: 'In use', closed: 'Closed' };
 
 export default function ManageScreen() {
   const C = useColors();
-  const styles = useMemo(() => makeStyles(C), [C]);
 
   const [courts, setCourts] = useState<Court[]>([]);
   const [newCourtName, setNewCourtName] = useState('');
-  const refresh = useCallback(() => setCourts(getCourts()), []);
+  const [settings, setSettings] = useState<AppSettings>(() => getSettings());
+  const refresh = useCallback(() => { setCourts(getCourts()); setSettings(getSettings()); }, []);
+  const update = (next: Partial<AppSettings>) => { saveSettings(next); setSettings(getSettings()); };
   useFocusEffect(useCallback(() => { refresh(); }, [refresh]));
 
   function handleNewSession() {
-    Alert.alert('Start New Session', 'Clears the queue and per-session game counts. Player records are kept.', [
+    Alert.alert('Start new session', 'Clears the queue and per-session game counts. Player records are kept.', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Start New', style: 'destructive', onPress: () => { startNewSession(); refresh(); Alert.alert('Done', 'A new session has started.'); } },
+      { text: 'Start new', style: 'destructive', onPress: () => { startNewSession(); refresh(); Alert.alert('Done', 'A new session has started.'); } },
     ]);
   }
   function handleReset() {
-    Alert.alert('Reset All Data', 'Permanently deletes every player, court, match, and record. There is no undo.', [
+    Alert.alert('Reset all data', 'Permanently deletes every player, court, match, and record. There is no undo.', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete Everything', style: 'destructive', onPress: () => { resetAllData(); refresh(); Alert.alert('Done', 'All data cleared.'); } },
+      { text: 'Delete everything', style: 'destructive', onPress: () => { resetAllData(); refresh(); Alert.alert('Done', 'All data cleared.'); } },
     ]);
   }
   function handleAddCourt() { const n = newCourtName.trim(); if (!n) return; addCourt(n); setNewCourtName(''); refresh(); }
@@ -38,64 +42,80 @@ export default function ManageScreen() {
       { text: 'Remove', style: 'destructive', onPress: () => { const r = removeCourt(c.court_id); if (!r.ok) { Alert.alert('Cannot remove', r.reason ?? ''); return; } refresh(); } },
     ]);
   }
-  const dot = (s: Court['status']) => (s === 'open' ? C.green : s === 'occupied' ? C.amber : C.red);
+  const dot = (s: Court['status']) => (s === 'open' ? C.green : s === 'occupied' ? C.amber : C.muted);
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={{ padding: 20, paddingBottom: 48 }}>
-      <Text style={styles.h1}>Manage</Text>
+    <Screen title="Manage">
+      <Section title="Courts" count={courts.length}>
+        <View style={styles.addRow}>
+          <TextField style={{ flex: 1 }} placeholder="New court name" value={newCourtName} onChangeText={setNewCourtName} onSubmitEditing={handleAddCourt} returnKeyType="done" />
+          <Button title="Add court" onPress={handleAddCourt} disabled={!newCourtName.trim()} />
+        </View>
+        <List>
+          {courts.length === 0 ? (
+            <EmptyText>No courts yet.</EmptyText>
+          ) : (
+            courts.map((c, i) => (
+              <ListRow
+                key={c.court_id}
+                last={i === courts.length - 1}
+                leading={<StatusDot color={dot(c.status)} />}
+                title={c.name}
+                subtitle={STATUS_LABEL[c.status]}
+                trailing={
+                  <>
+                    {c.status !== 'occupied' && (
+                      <Button title={c.status === 'open' ? 'Close' : 'Open'} variant="plain" size="sm" onPress={() => toggleCourt(c)} />
+                    )}
+                    <Button title="Remove" variant="plainDestructive" size="sm" onPress={() => confirmRemove(c)} />
+                  </>
+                }
+              />
+            ))
+          )}
+        </List>
+      </Section>
 
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Session</Text>
-        <Pressable onPress={handleNewSession} style={({ pressed }) => [styles.btn, { backgroundColor: C.red }, pressed && styles.pressed]}><Text style={styles.btnText}>Start New Session</Text></Pressable>
-        <Text style={styles.hint}>Clears the queue and per-session game counts. Player records are kept.</Text>
-      </View>
+      <Section title="Match settings" footer="Changes apply to the next matches. Matches already on court keep going.">
+        <Card>
+          <SettingRow label="Match type" hint={settings.matchType === 'doubles' ? '4 players per court' : '2 players per court'}>
+            <View style={{ width: 170 }}>
+              <Segmented
+                options={[{ value: 'doubles', label: 'Doubles' }, { value: 'singles', label: 'Singles' }]}
+                value={settings.matchType}
+                onChange={(v) => update({ matchType: v })}
+              />
+            </View>
+          </SettingRow>
+          <View style={[styles.divider, { backgroundColor: C.line }]} />
+          <SettingRow label="Match time limit" hint="Courts show Over time after this">
+            <Stepper value={settings.matchLimitMin} min={5} max={90} step={5} format={(v) => `${v} min`} onChange={(v) => update({ matchLimitMin: v })} />
+          </SettingRow>
+          <View style={[styles.divider, { backgroundColor: C.line }]} />
+          <SettingRow label="Rest between games" hint={settings.restMin === 0 ? 'Players can go straight back on' : 'Players sit out at least this long'}>
+            <Stepper value={settings.restMin} min={0} max={30} step={1} format={(v) => (v === 0 ? 'None' : `${v} min`)} onChange={(v) => update({ restMin: v })} />
+          </SettingRow>
+        </Card>
+      </Section>
 
-      <View style={styles.headRow}><Text style={styles.h2}>Courts</Text><Text style={styles.count}>{courts.length}</Text></View>
-      <View style={styles.addRow}>
-        <TextInput style={styles.input} placeholder="New court name" placeholderTextColor={C.muted} value={newCourtName} onChangeText={setNewCourtName} />
-        <Pressable onPress={handleAddCourt} style={({ pressed }) => [styles.addBtn, pressed && styles.pressed]}><Text style={styles.addBtnText}>Add</Text></Pressable>
-      </View>
-      <View style={styles.list}>
-        {courts.map((c) => (
-          <View key={c.court_id} style={styles.row}>
-            <View style={[styles.statusDot, { backgroundColor: dot(c.status) }]} />
-            <View style={{ flex: 1 }}><Text style={styles.courtName}>{c.name}</Text><Text style={styles.courtStatus}>{c.status}</Text></View>
-            <Pressable onPress={() => toggleCourt(c)} disabled={c.status === 'occupied'} style={({ pressed }) => [styles.miniBtn, c.status === 'occupied' ? { backgroundColor: C.card2 } : c.status === 'open' ? { backgroundColor: C.amber } : { backgroundColor: C.green }, pressed && c.status !== 'occupied' && styles.pressed]}>
-              <Text style={[styles.miniText, c.status === 'occupied' && { color: C.muted }]}>{c.status === 'occupied' ? 'In use' : c.status === 'open' ? 'Close' : 'Open'}</Text>
-            </Pressable>
-            <Pressable onPress={() => confirmRemove(c)} style={({ pressed }) => [styles.miniBtn, { backgroundColor: C.red }, pressed && styles.pressed]}><Text style={[styles.miniText, { color: '#fff' }]}>Remove</Text></Pressable>
-          </View>
-        ))}
-      </View>
+      <Section title="Session">
+        <Card>
+          <BodyText>Start a new session to clear the queue and today&apos;s game counts. Player records are kept.</BodyText>
+          <Button title="Start new session" variant="secondary" onPress={handleNewSession} />
+        </Card>
+      </Section>
 
-      <Text style={[styles.h2, { marginTop: 28, marginBottom: 12 }]}>Danger Zone</Text>
-      <Pressable onPress={handleReset} style={({ pressed }) => [styles.btn, { backgroundColor: '#7f1d1d' }, pressed && styles.pressed]}><Text style={styles.btnText}>Reset All Data</Text></Pressable>
-      <Text style={styles.hint}>Deletes all players, courts, matches, and records. Cannot be undone.</Text>
-    </ScrollView>
+      <Section title="Danger zone">
+        <Card>
+          <BodyText>Permanently deletes every player, court, match, and record. This can&apos;t be undone.</BodyText>
+          <Button title="Reset all data" variant="destructiveSoft" onPress={handleReset} />
+        </Card>
+      </Section>
+    </Screen>
   );
 }
 
-const makeStyles = (C: Palette) => StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.bg },
-  h1: { fontSize: 30, fontWeight: '800', color: C.text, marginBottom: 16 },
-  h2: { fontSize: 20, fontWeight: '700', color: C.text },
-  headRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 24, marginBottom: 12 },
-  count: { fontSize: 14, color: C.muted, fontWeight: '600' },
-  card: { backgroundColor: C.card, borderRadius: 24, padding: 18, gap: 12 },
-  cardTitle: { fontSize: 17, fontWeight: '700', color: C.text },
-  hint: { fontSize: 12, color: C.muted },
-  btn: { borderRadius: 16, paddingVertical: 14, alignItems: 'center' },
-  btnText: { color: '#fff', fontWeight: '800', fontSize: 15 },
-  input: { flex: 1, backgroundColor: C.card2, borderRadius: 14, paddingVertical: 13, paddingHorizontal: 16, fontSize: 15, color: C.text },
-  addRow: { flexDirection: 'row', gap: 10, marginBottom: 12 },
-  addBtn: { backgroundColor: C.lime, borderRadius: 14, paddingHorizontal: 22, justifyContent: 'center' },
-  addBtnText: { color: C.onLime, fontWeight: '800' },
-  list: { backgroundColor: C.card, borderRadius: 24, paddingHorizontal: 6, paddingVertical: 4 },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 13, paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: C.line },
-  statusDot: { width: 10, height: 10, borderRadius: 5 },
-  courtName: { fontSize: 16, color: C.text, fontWeight: '600' },
-  courtStatus: { fontSize: 12, color: C.muted, marginTop: 2, textTransform: 'capitalize' },
-  miniBtn: { borderRadius: 999, paddingVertical: 8, paddingHorizontal: 14 },
-  miniText: { color: '#241a00', fontWeight: '700', fontSize: 12 },
-  pressed: { opacity: 0.7 },
+const styles = StyleSheet.create({
+  addRow: { flexDirection: 'row', gap: 10, alignItems: 'center' },
+  divider: { height: StyleSheet.hairlineWidth },
 });
