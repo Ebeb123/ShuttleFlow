@@ -1,15 +1,16 @@
 import { useCallback, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Linking, StyleSheet, Text, View } from 'react-native';
 import { Alert } from '../lib/alert';
 import { useFocusEffect } from 'expo-router';
 
-import { getCourts, addCourt, setCourtStatus, removeCourt, startNewSession, resetAllData, getSettings, saveSettings, type Court, type AppSettings } from '../db/db';
+import { getCourts, addCourt, setCourtStatus, removeCourt, startNewSession, resetAllData, getSettings, saveSettings, type Court, type AppSettings } from '../state/store';
 import { useColors } from '../theme';
-import { BodyText, Button, Card, EmptyText, List, ListRow, Screen, Section, Segmented, SettingRow, StatusDot, Stepper, TextField } from '../components/ui/kit';
+import { BodyText, Button, Card, Columns, EmptyText, List, ListRow, Screen, Section, Segmented, SettingRow, StatusDot, Stepper, TextField } from '../components/ui/kit';
 
 const STATUS_LABEL: Record<Court['status'], string> = { open: 'Open', occupied: 'In use', closed: 'Closed' };
+const PORTFOLIO_URL = 'https://aebriam.vercel.app';
 
-export default function ManageScreen() {
+export default function SettingsScreen() {
   const C = useColors();
 
   const [courts, setCourts] = useState<Court[]>([]);
@@ -20,10 +21,14 @@ export default function ManageScreen() {
   useFocusEffect(useCallback(() => { refresh(); }, [refresh]));
 
   function handleNewSession() {
-    Alert.alert('Start new session', 'Clears the queue and per-session game counts. Player records are kept.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Start new', style: 'destructive', onPress: () => { startNewSession(); refresh(); Alert.alert('Done', 'A new session has started.'); } },
-    ]);
+    Alert.alert(
+      'Start new session?',
+      'This clears every queue, court match and round, and removes every player who is not locked. Locked players stay, but their wins, losses and games go back to 0.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Start new session', style: 'destructive', onPress: () => { startNewSession(); refresh(); Alert.alert('Done', 'A new session has started.'); } },
+      ]
+    );
   }
   function handleReset() {
     Alert.alert('Reset all data', 'Permanently deletes every player, court, match, and record. There is no undo.', [
@@ -45,10 +50,11 @@ export default function ManageScreen() {
   const dot = (s: Court['status']) => (s === 'open' ? C.green : s === 'occupied' ? C.amber : C.muted);
 
   return (
-    <Screen title="Manage">
+    <Screen title="Settings">
+      <Columns>
       <Section title="Courts" count={courts.length}>
         <View style={styles.addRow}>
-          <TextField style={{ flex: 1 }} placeholder="New court name" value={newCourtName} onChangeText={setNewCourtName} onSubmitEditing={handleAddCourt} returnKeyType="done" />
+          <TextField style={{ flexGrow: 1, flexBasis: 180 }} placeholder="New court name" value={newCourtName} onChangeText={setNewCourtName} onSubmitEditing={handleAddCourt} returnKeyType="done" />
           <Button title="Add court" onPress={handleAddCourt} disabled={!newCourtName.trim()} />
         </View>
         <List>
@@ -76,20 +82,17 @@ export default function ManageScreen() {
         </List>
       </Section>
 
+      <View style={{ gap: 28 }}>
       <Section title="Match settings" footer="Changes apply to the next matches. Matches already on court keep going.">
         <Card>
           <SettingRow label="Match type" hint={settings.matchType === 'doubles' ? '4 players per court' : '2 players per court'}>
-            <View style={{ width: 170 }}>
+            <View style={{ minWidth: 170 }}>
               <Segmented
                 options={[{ value: 'doubles', label: 'Doubles' }, { value: 'singles', label: 'Singles' }]}
                 value={settings.matchType}
                 onChange={(v) => update({ matchType: v })}
               />
             </View>
-          </SettingRow>
-          <View style={[styles.divider, { backgroundColor: C.line }]} />
-          <SettingRow label="Match time limit" hint="Courts show Over time after this">
-            <Stepper value={settings.matchLimitMin} min={5} max={90} step={5} format={(v) => `${v} min`} onChange={(v) => update({ matchLimitMin: v })} />
           </SettingRow>
           <View style={[styles.divider, { backgroundColor: C.line }]} />
           <SettingRow label="Rest between games" hint={settings.restMin === 0 ? 'Players can go straight back on' : 'Players sit out at least this long'}>
@@ -100,7 +103,7 @@ export default function ManageScreen() {
 
       <Section title="Session">
         <Card>
-          <BodyText>Start a new session to clear the queue and today&apos;s game counts. Player records are kept.</BodyText>
+          <BodyText>Start a new session to clear all queues, courts and rounds. Unlocked players are removed; locked players stay with their stats reset to 0.</BodyText>
           <Button title="Start new session" variant="secondary" onPress={handleNewSession} />
         </Card>
       </Section>
@@ -111,11 +114,27 @@ export default function ManageScreen() {
           <Button title="Reset all data" variant="destructiveSoft" onPress={handleReset} />
         </Card>
       </Section>
+      </View>
+      </Columns>
+
+      <Text style={[styles.credit, { color: C.muted }]}>
+        Made by:{' '}
+        <Text
+          style={[styles.creditLink, { color: C.accent }]}
+          onPress={() => Linking.openURL(PORTFOLIO_URL)}
+          accessibilityRole="link"
+          accessibilityHint="Opens the developer's portfolio"
+        >
+          Aebriam
+        </Text>
+      </Text>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  addRow: { flexDirection: 'row', gap: 10, alignItems: 'center' },
+  addRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, alignItems: 'center' },
+  credit: { fontSize: 12, textAlign: 'center', marginTop: -8, opacity: 0.85 },
+  creditLink: { fontWeight: '700', textDecorationLine: 'underline' },
   divider: { height: StyleSheet.hairlineWidth },
 });

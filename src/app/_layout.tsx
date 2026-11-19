@@ -1,56 +1,25 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { ActivityIndicator, Text, View, useColorScheme } from 'react-native';
-import { useEffect, useState } from 'react';
+import { useColorScheme } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import AppTabs from '@/components/app-tabs';
-
-import { initDatabase } from '../db/db';
-import { prepareDatabase } from '../db/sqlite';
+import { AlertHost } from '@/lib/alert';
 
 SplashScreen.preventAutoHideAsync();
 
 export default function TabLayout() {
   const colorScheme = useColorScheme();
-  const [ready, setReady] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // The database must be ready before any screen reads from it.
-  useEffect(() => {
-    let cancelled = false;
-    prepareDatabase()
-      .then(() => {
-        initDatabase();
-        if (!cancelled) setReady(true);
-      })
-      .catch((e) => {
-        SplashScreen.hideAsync().catch(() => {});
-        if (!cancelled) setError(String(e?.message ?? e));
-      });
-    return () => { cancelled = true; };
-  }, []);
-
-  if (error) {
-    return (
-      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 }}>
-        <Text style={{ color: '#dd5049', fontWeight: '700', marginBottom: 6 }}>Could not start the app</Text>
-        <Text style={{ color: '#6b6b74', textAlign: 'center' }}>{error}</Text>
-      </View>
-    );
-  }
-  if (!ready) {
-    return (
-      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colorScheme === 'dark' ? '#0f1626' : '#eef3f6' }}>
-        <ActivityIndicator color="#548994" size="large" />
-      </View>
-    );
-  }
-
+  // All data lives in memory (src/state/store.ts), so there's nothing to load first.
+  // GestureHandlerRootView lets the Live tab use press-and-hold dragging.
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
-    </ThemeProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+        <AnimatedSplashOverlay />
+        <AppTabs />
+        <AlertHost />
+      </ThemeProvider>
+    </GestureHandlerRootView>
   );
 }

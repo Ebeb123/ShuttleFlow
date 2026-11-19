@@ -1,19 +1,21 @@
 // Shared glass UI building blocks so every tab looks the same:
 // background, screen + sections, frosted cards and lists, buttons, inputs, segmented control, dialog.
-import type { ReactNode } from 'react';
+import { Children, type ReactNode } from 'react';
 import {
-  Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
+  Image, Keyboard, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions,
   type StyleProp, type TextInputProps, type ViewStyle,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 
 import { levelColor, useColors } from '../../theme';
-import type { Level } from '../../db/db';
+import type { Level } from '../../state/store';
+import type { ScrollBind } from '../swap-layer';
 
 // Real blur on iOS + web. Android blur is heavy, so it gets a more opaque panel instead.
 const BLUR = Platform.OS !== 'android';
-const LOGO = require('../../../assets/images/icon.png');
+const LOGO = require('../../../assets/images/packq-logo.png');
 
 // ------------------------------------------------------------------ background + glass
 /** Soft glow made of stacked, very faint circles (works everywhere, no blur filter needed). */
@@ -61,25 +63,97 @@ export function Glass({ children, style, strong, radius = 20 }: {
 }
 
 // ------------------------------------------------------------------ layout
-export function Screen({ title, subtitle, children }: { title: string; subtitle?: string; children: ReactNode }) {
+/** Wraps a tap handler so it also closes the phone keyboard: one tap does both. */
+export function dismissing<A extends unknown[]>(fn?: (...args: A) => void) {
+  return (...args: A) => { Keyboard.dismiss(); fn?.(...args); };
+}
+
+// ------------------------------------------------------------------ responsive helpers
+export type ScreenSize = 'sm' | 'md' | 'lg';
+/** Screen size class: 'sm' small phones (<380), 'md' phones, 'lg' tablets (768+). `wide` = room for 2 columns (900+). */
+export function useLayout(): { width: number; size: ScreenSize; wide: boolean } {
+  const { width } = useWindowDimensions();
+  return { width, size: width < 380 ? 'sm' : width >= 768 ? 'lg' : 'md', wide: width >= 900 };
+}
+const GAPS: Record<ScreenSize, number> = { sm: 20, md: 28, lg: 32 };
+
+/** Side-by-side columns on wide screens (tablets, desktop); stacked on phones. `flex` sets each column's share. */
+export function Columns({ children, flex }: { children: ReactNode; flex?: number[] }) {
+  const { wide, size } = useLayout();
+  const items = Children.toArray(children);
+  if (!wide) return <View style={{ gap: GAPS[size] }}>{items}</View>;
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 24 }}>
+      {items.map((c, i) => <View key={i} style={{ flex: flex?.[i] ?? 1, minWidth: 0, gap: GAPS[size] }}>{c}</View>)}
+    </View>
+  );
+}
+
+/** Cards that flow into as many columns as fit (each at least `min` px wide). */
+export function Grid({ children, min, gap = 12 }: { children: ReactNode; min: number; gap?: number }) {
+  return (
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap }}>
+      {Children.toArray(children).map((c, i) => <View key={i} style={{ flexGrow: 1, flexBasis: min, minWidth: 0 }}>{c}</View>)}
+    </View>
+  );
+}
+
+/** Header sizes: small phones, normal phones, tablets. */
+const HEADER = {
+  sm: { pad: 14, top: 10, logo: 40, title: 24, sub: 13, gap: 10 },
+  md: { pad: 20, top: 14, logo: 48, title: 30, sub: 15, gap: 14 },
+  lg: { pad: 28, top: 20, logo: 58, title: 36, sub: 17, gap: 16 },
+};
+
+export function Screen({ title, subtitle, children, scrollEnabled = true, overlay, scrollBind }: {
+  title: string; subtitle?: string; children: ReactNode;
+  /** false while dragging a player so the page doesn't scroll. */
+  scrollEnabled?: boolean;
+  /** Drawn on top of the whole screen (swap lines, drag ghost). */
+  overlay?: ReactNode;
+  /** Lets the Live tab scroll the page itself while you drag a player near the edge. */
+  scrollBind?: ScrollBind;
+}) {
   const C = useColors();
+  // Stay below the status bar / notch, and scale the header for small phones and tablets.
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const sz = width < 380 ? HEADER.sm : width >= 768 ? HEADER.lg : HEADER.md;
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
       <GlassBackground />
       <ScrollView
         style={{ flex: 1 }}
-        contentContainerStyle={[s.content, { paddingBottom: Platform.OS === 'web' ? 120 : 48 }]}
+        contentContainerStyle={[
+          s.content,
+          {
+            paddingTop: insets.top + sz.top,
+            paddingLeft: Math.max(sz.pad, insets.left + 8),
+            paddingRight: Math.max(sz.pad, insets.right + 8),
+            // web: room for the floating tab bar (plus the home bar on phones)
+            paddingBottom: Platform.OS === 'web' ? 110 + insets.bottom : 48,
+          },
+        ]}
         keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        scrollEnabled={scrollEnabled}
+        {...scrollBind}
       >
-        <View style={s.header}>
-          <View style={s.logoTile}><Image source={LOGO} style={s.logo} resizeMode="contain" /></View>
-          <View style={{ flex: 1 }}>
-            <Text style={[s.title, { color: C.text }]}>{title}</Text>
-            {subtitle ? <Text style={[s.subtitle, { color: C.muted }]}>{subtitle}</Text> : null}
+        {/* Tapping an empty part of the page closes the keyboard (buttons still get their taps). */}
+        <View style={[s.page, { gap: GAPS[width < 380 ? 'sm' : width >= 768 ? 'lg' : 'md'] }]} onStartShouldSetResponder={() => true} onResponderRelease={() => Keyboard.dismiss()}>
+        <View style={[s.header, { gap: sz.gap }]}>
+          <View style={[s.logoTile, { width: sz.logo, height: sz.logo, borderRadius: sz.logo * 0.29 }]}>
+            <Image source={LOGO} style={{ width: sz.logo - 4, height: sz.logo - 4 }} resizeMode="contain" />
+          </View>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={[s.title, { color: C.text, fontSize: sz.title }]}>{title}</Text>
+            {subtitle ? <Text style={[s.subtitle, { color: C.muted, fontSize: sz.sub }]}>{subtitle}</Text> : null}
           </View>
         </View>
         {children}
+        </View>
       </ScrollView>
+      {overlay}
     </View>
   );
 }
@@ -124,11 +198,11 @@ export function ListRow({ leading, title, level, accessory, subtitle, trailing, 
       <View style={[s.rowBody, !leading && { marginLeft: 0 }, !last && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.line }]}>
         <View style={{ flex: 1, minWidth: 0 }}>
           <View style={s.titleLine}>
-            <Text style={[s.rowTitle, { color: C.text, flexShrink: 1 }]} numberOfLines={1}>{title}</Text>
+            <Text style={[s.rowTitle, { color: C.text, flexShrink: 1 }]}>{title}</Text>
             {level ? <LevelBadge level={level} /> : null}
             {accessory}
           </View>
-          {subtitle ? <Text style={[s.rowSub, { color: C.muted }]} numberOfLines={1}>{subtitle}</Text> : null}
+          {subtitle ? <Text style={[s.rowSub, { color: C.muted }]}>{subtitle}</Text> : null}
         </View>
         {trailing ? <View style={s.trailing}>{trailing}</View> : null}
       </View>
@@ -136,7 +210,7 @@ export function ListRow({ leading, title, level, accessory, subtitle, trailing, 
   );
   if (!onPress) return <View style={[s.row, dimmed && { opacity: 0.5 }]}>{body}</View>;
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [s.row, pressed && { backgroundColor: C.card2 }, dimmed && { opacity: 0.5 }]}>
+    <Pressable onPress={dismissing(onPress)} style={({ pressed }) => [s.row, pressed && { backgroundColor: C.card2 }, dimmed && { opacity: 0.5 }]}>
       {body}
     </Pressable>
   );
@@ -177,7 +251,7 @@ export function Button({ title, onPress, variant = 'primary', size = 'md', disab
   const plain = variant === 'plain' || variant === 'plainDestructive';
   return (
     <Pressable
-      onPress={onPress}
+      onPress={dismissing(onPress)}
       disabled={disabled}
       hitSlop={sm ? 6 : 0}
       style={({ pressed }) => [
@@ -189,7 +263,7 @@ export function Button({ title, onPress, variant = 'primary', size = 'md', disab
         style,
       ]}
     >
-      <Text style={[sm ? s.btnTextSm : s.btnText, { color: fg }]} numberOfLines={1}>{title}</Text>
+      <Text style={[sm ? s.btnTextSm : s.btnText, { color: fg }]}>{title}</Text>
     </Pressable>
   );
 }
@@ -215,9 +289,9 @@ export function Segmented<T extends string | number>({ options, value, onChange 
       {options.map((o) => {
         const on = o.value === value;
         return (
-          <Pressable key={String(o.value)} onPress={() => onChange(o.value)} style={[s.seg, on && [s.segOn, { backgroundColor: C.raised }]]}>
+          <Pressable key={String(o.value)} onPress={dismissing(() => onChange(o.value))} style={[s.seg, on && [s.segOn, { backgroundColor: C.raised }]]}>
             {o.dot ? <View style={[s.segDot, { backgroundColor: o.dot }]} /> : null}
-            <Text style={[s.segText, small && { fontSize: 12 }, { color: on ? C.text : C.muted }, on && { fontWeight: '600' }]} numberOfLines={1}>
+            <Text style={[s.segText, small && { fontSize: 12 }, { color: on ? C.text : C.muted }, on && { fontWeight: '600' }]}>
               {o.label}
             </Text>
           </Pressable>
@@ -234,7 +308,7 @@ export function Stepper({ value, onChange, min = 0, max = 999, step = 1, format 
   const C = useColors();
   const btn = (label: string, next: number, disabled: boolean) => (
     <Pressable
-      onPress={() => onChange(Math.min(max, Math.max(min, next)))}
+      onPress={dismissing(() => onChange(Math.min(max, Math.max(min, next))))}
       disabled={disabled}
       hitSlop={6}
       style={({ pressed }) => [s.stepBtn, { backgroundColor: C.card, borderColor: C.glassBorder }, disabled ? { opacity: 0.35 } : pressed && { opacity: 0.7 }]}
@@ -256,7 +330,7 @@ export function SettingRow({ label, hint, children }: { label: string; hint?: st
   const C = useColors();
   return (
     <View style={s.settingRow}>
-      <View style={{ flex: 1 }}>
+      <View style={{ flexGrow: 1, flexShrink: 1, flexBasis: 160 }}>
         <Text style={[s.rowTitle, { color: C.text }]}>{label}</Text>
         {hint ? <Text style={[s.rowSub, { color: C.muted }]}>{hint}</Text> : null}
       </View>
@@ -278,12 +352,12 @@ const initials = (name: string) =>
   name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w.charAt(0).toUpperCase()).join('');
 
 /** Initials circle. With a level it uses that level's colour (green / yellow / orange / red). */
-export function Avatar({ name, level }: { name: string; level?: Level }) {
+export function Avatar({ name, level, size = 36 }: { name: string; level?: Level; size?: number }) {
   const C = useColors();
   const c = level ? levelColor(level, C.dark) : null;
   return (
-    <View style={[s.avatar, { backgroundColor: c ? c.bg : C.accentSoft }, c && { borderWidth: 1.5, borderColor: c.dot }]}>
-      <Text style={[s.avatarText, { color: c ? c.text : C.accent }]}>{initials(name)}</Text>
+    <View style={[s.avatar, { width: size, height: size, borderRadius: size / 2, backgroundColor: c ? c.bg : C.accentSoft }, c && { borderWidth: 1.5, borderColor: c.dot }]}>
+      <Text style={[s.avatarText, { color: c ? c.text : C.accent }, size < 34 && { fontSize: 11 }]}>{initials(name)}</Text>
     </View>
   );
 }
@@ -325,6 +399,90 @@ export function StatusDot({ color }: { color: string }) {
   return <View style={[s.dot, { backgroundColor: color }]} />;
 }
 
+// ------------------------------------------------------------------ icons
+// Small icons drawn with plain Views (no emoji, no icon font), so they look
+// the same on every phone and in the browser.
+
+/** Padlock. Closed when locked; the shackle lifts and opens when unlocked. */
+export function LockIcon({ locked, color, size = 18 }: { locked: boolean; color: string; size?: number }) {
+  const bodyW = size * 0.78;
+  const bodyH = size * 0.55;
+  const shW = size * 0.5;
+  const shH = size * 0.5;
+  const t = Math.max(2, size * 0.12);
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'flex-end' }}>
+      <View
+        style={{
+          width: shW, height: shH, borderWidth: t, borderBottomWidth: 0, borderColor: color,
+          borderTopLeftRadius: shW, borderTopRightRadius: shW, marginBottom: -t * 0.3,
+          transform: locked ? [] : [{ translateY: -size * 0.12 }, { translateX: size * 0.16 }],
+        }}
+      />
+      <View style={{ width: bodyW, height: bodyH, borderRadius: size * 0.12, backgroundColor: color, alignItems: 'center', justifyContent: 'center' }}>
+        <View style={{ width: t, height: bodyH * 0.4, borderRadius: t, backgroundColor: 'rgba(0,0,0,0.35)' }} />
+      </View>
+    </View>
+  );
+}
+
+/** Pencil (edit). */
+export function PencilIcon({ color, size = 16 }: { color: string; size?: number }) {
+  const w = size * 0.28;
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center', transform: [{ rotate: '45deg' }] }}>
+      <View style={{ width: w, height: size * 0.62, backgroundColor: color, borderTopLeftRadius: w * 0.3, borderTopRightRadius: w * 0.3 }} />
+      <View style={{ width: 0, height: 0, borderLeftWidth: w / 2, borderRightWidth: w / 2, borderTopWidth: size * 0.22, borderLeftColor: 'transparent', borderRightColor: 'transparent', borderTopColor: color }} />
+    </View>
+  );
+}
+
+/** Check mark (done). */
+export function CheckIcon({ color, size = 16 }: { color: string; size?: number }) {
+  const t = Math.max(2, size * 0.16);
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      <View style={{ width: size * 0.36, height: size * 0.68, borderRightWidth: t, borderBottomWidth: t, borderColor: color, transform: [{ rotate: '45deg' }], marginTop: -size * 0.14 }} />
+    </View>
+  );
+}
+
+/** Two arrows pointing opposite ways (replace / swap). */
+/** Die showing five: rounded square with pips. */
+export function DiceIcon({ color, pip, size = 18 }: { color: string; pip: string; size?: number }) {
+  const d = Math.max(3, size * 0.18);
+  const at = (x: number, y: number) => (
+    <View key={`${x}-${y}`} style={{ position: 'absolute', width: d, height: d, borderRadius: d, backgroundColor: pip, left: size * x - d / 2, top: size * y - d / 2 }} />
+  );
+  return (
+    <View style={{ width: size, height: size, borderRadius: size * 0.24, backgroundColor: color }}>
+      {[[0.28, 0.28], [0.72, 0.28], [0.5, 0.5], [0.28, 0.72], [0.72, 0.72]].map(([x, y]) => at(x, y))}
+    </View>
+  );
+}
+
+export function SwapIcon({ color, size = 16 }: { color: string; size?: number }) {
+  const t = Math.max(2, size * 0.13);
+  const head = size * 0.22;
+  const arrow = (dir: 1 | -1) => (
+    <View style={{ flexDirection: dir === 1 ? 'row' : 'row-reverse', alignItems: 'center' }}>
+      <View style={{ width: size * 0.7, height: t, backgroundColor: color }} />
+      <View
+        style={[
+          { width: 0, height: 0, borderTopWidth: head, borderBottomWidth: head, borderTopColor: 'transparent', borderBottomColor: 'transparent' },
+          dir === 1 ? { borderLeftWidth: head * 1.2, borderLeftColor: color } : { borderRightWidth: head * 1.2, borderRightColor: color },
+        ]}
+      />
+    </View>
+  );
+  return (
+    <View style={{ width: size, height: size, justifyContent: 'center', gap: size * 0.12 }}>
+      {arrow(1)}
+      {arrow(-1)}
+    </View>
+  );
+}
+
 // ------------------------------------------------------------------ dialog
 export function Dialog({ visible, onClose, title, subtitle, children, actions }: {
   visible: boolean; onClose: () => void; title: string; subtitle?: string; children?: ReactNode; actions?: ReactNode;
@@ -349,10 +507,10 @@ export function Dialog({ visible, onClose, title, subtitle, children, actions }:
 }
 
 const s = StyleSheet.create({
-  content: { padding: 20, gap: 28, width: '100%', maxWidth: 1200, alignSelf: 'center' },
+  content: { padding: 20, width: '100%', maxWidth: 1200, alignSelf: 'center' },
+  page: { gap: 28 },
   header: { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: -8 },
-  logoTile: { width: 48, height: 48, borderRadius: 14, backgroundColor: '#ffffff', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
-  logo: { width: 44, height: 44 },
+  logoTile: { width: 48, height: 48, borderRadius: 14, backgroundColor: '#060a14', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   title: { fontSize: 30, fontWeight: '800' },
   subtitle: { fontSize: 15, marginTop: 2 },
 
@@ -365,7 +523,7 @@ const s = StyleSheet.create({
   row: { flexDirection: 'row', alignItems: 'center', paddingLeft: 16 },
   leading: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   rowBody: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 12, paddingVertical: 12, paddingRight: 16, minHeight: 56 },
-  titleLine: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  titleLine: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
   rowTitle: { fontSize: 16, fontWeight: '500' },
   rowSub: { fontSize: 13, marginTop: 1 },
   trailing: { flexDirection: 'row', alignItems: 'center', gap: 4 },
@@ -375,22 +533,22 @@ const s = StyleSheet.create({
 
   btn: { borderRadius: 12, paddingVertical: 12, paddingHorizontal: 16, alignItems: 'center', justifyContent: 'center' },
   btnSm: { borderRadius: 10, paddingVertical: 6, paddingHorizontal: 12, alignItems: 'center', justifyContent: 'center' },
-  btnText: { fontSize: 15, fontWeight: '600' },
-  btnTextSm: { fontSize: 13, fontWeight: '600' },
+  btnText: { fontSize: 15, fontWeight: '600', textAlign: 'center' },
+  btnTextSm: { fontSize: 13, fontWeight: '600', textAlign: 'center' },
 
   input: { borderWidth: 1, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 12, fontSize: 15, minHeight: 44 },
 
-  segTrack: { flexDirection: 'row', borderRadius: 12, padding: 3, borderWidth: 1 },
-  seg: { flex: 1, flexDirection: 'row', justifyContent: 'center', gap: 5, borderRadius: 9, paddingVertical: 7, paddingHorizontal: 4, alignItems: 'center' },
+  segTrack: { flexDirection: 'row', flexWrap: 'wrap', borderRadius: 12, padding: 3, borderWidth: 1 },
+  seg: { flexGrow: 1, flexBasis: 'auto', flexDirection: 'row', justifyContent: 'center', gap: 5, borderRadius: 9, paddingVertical: 7, paddingHorizontal: 4, alignItems: 'center' },
   segDot: { width: 7, height: 7, borderRadius: 4 },
   segOn: { shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 3, shadowOffset: { width: 0, height: 1 }, elevation: 1 },
-  segText: { fontSize: 13, fontWeight: '500' },
+  segText: { fontSize: 13, fontWeight: '500', textAlign: 'center' },
 
   stepper: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   stepBtn: { width: 34, height: 34, borderRadius: 10, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
   stepBtnText: { fontSize: 18, fontWeight: '600', marginTop: -1 },
   stepValue: { minWidth: 56, textAlign: 'center', fontSize: 15, fontWeight: '600', fontVariant: ['tabular-nums'] },
-  settingRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  settingRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 12 },
   check: { width: 20, height: 20, borderRadius: 6, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center' },
   checkMark: { width: 6, height: 10, borderRightWidth: 2, borderBottomWidth: 2, transform: [{ rotate: '45deg' }], marginTop: -2 },
   avatar: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
@@ -405,5 +563,5 @@ const s = StyleSheet.create({
   dialog: { width: '100%', maxWidth: 480, alignSelf: 'center', padding: 20, gap: 16 },
   dialogTitle: { fontSize: 18, fontWeight: '700' },
   dialogSub: { fontSize: 14, marginTop: 4 },
-  dialogActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  dialogActions: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 10 },
 });

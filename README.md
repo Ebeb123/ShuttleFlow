@@ -1,13 +1,12 @@
-# ShuttleFlow — Badminton Queue Manager
+# PACK-Q — Badminton Queue Manager
 
-A queue and court manager for open-play badminton sessions (React Native + Expo + SQLite): add players, check them into the queue, auto-match fair games by level and waiting time, track live courts and win/loss stats.
+A queue and court manager for open-play badminton sessions (React Native + Expo): add players, auto-match fair games by level in rounds, run live courts, and track wins, losses and games on a leaderboard.
 
 ## Web version
 
 The app also runs in the browser.
 
-- In the browser, the app uses the same SQLite schema through [sql.js](https://sql.js.org) (SQLite compiled to WebAssembly, served from `public/`). On phones it uses `expo-sqlite`.
-- The app starts empty. Data is saved in the browser it was entered in (localStorage), so use the same device and browser each session.
+- All data is kept in memory only (`src/state/store.ts`). There is no database: reloading or closing the app starts fresh.
 
 Run the web version locally:
 

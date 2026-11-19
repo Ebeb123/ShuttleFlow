@@ -1,5 +1,5 @@
 import { useColorScheme } from 'react-native';
-import type { Level } from './db/db';
+import type { Level } from './state/store';
 
 // Colours come from the app logo: navy #273555 and teal #548994.
 export const BRAND = { navy: '#273555', teal: '#548994' };

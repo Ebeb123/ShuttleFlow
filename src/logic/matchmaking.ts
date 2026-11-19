@@ -1,213 +1,172 @@
 // logic/matchmaking.ts
-import type { WaitingPlayer, MatchType, Level } from '../db/db';
+// ---------------------------------------------------------------------------
+// Pure matchmaking rules (no React, no state). The store calls planMatches()
+// with the players who are free and allowed to play in the current round.
+//
+// Level rules for doubles (2 teams of 2):
+//   - all 4 players the same level            → B+B vs B+B, I+I vs I+I, …
+//   - 2 players of a level + 2 of the next one → B+I vs B+I, I+A vs I+A, A+P vs A+P
+//     and every team gets one of each level (mirrored teams).
+//   Anything else (e.g. Beginner with Advance) is never auto-matched.
+// Singles: same level first, an adjacent level only as a fallback.
+// ---------------------------------------------------------------------------
+export const LEVELS = ['Beginner', 'Intermediate', 'Advance', 'Pro'] as const;
+export type Level = (typeof LEVELS)[number];
 
-export type MatchConfig = {
-  playersPerMatch: number;
-  matchType: MatchType;
-  wGames: number;
-  wWait: number;
-  minRestMin: number;
+const li = (l: Level) => LEVELS.indexOf(l);
+
+/** A player who could be put into a new match. */
+export type Candidate = {
+  id: number;
+  level: Level;
+  games: number;        // games played this session (fewer = higher priority)
+  waitingSince: number; // ms timestamp (earlier = higher priority)
+  carryOver: boolean;   // left out of the previous round → top priority
 };
 
-export const DEFAULT_CONFIG: MatchConfig = {
-  playersPerMatch: 4,
-  matchType: 'doubles',
-  wGames: 0,
-  wWait: 1,
-  minRestMin: 0,
-};
+/** How often two players were partners / opponents this session. */
+export type History = { partners: Map<string, number>; opponents: Map<string, number> };
+export type Plan = { team1: number[]; team2: number[] };
 
-export type PartnerMap = Record<number, number[]>;
-/** Forced partners: player_id -> partner_id (both directions). */
-export type PairMap = Record<number, number>;
+const key = (a: number, b: number) => (a < b ? `${a}-${b}` : `${b}-${a}`);
+export const emptyHistory = (): History => ({ partners: new Map(), opponents: new Map() });
 
-const LEVEL_ORDER: Level[] = ['Beginner', 'Intermediate', 'Advance', 'Pro'];
-
-function parseSqlDate(s: string): Date {
-  return new Date(s.replace(' ', 'T') + 'Z');
-}
-export function minutesSince(sqlDate: string, now: Date): number {
-  return Math.max(0, (now.getTime() - parseSqlDate(sqlDate).getTime()) / 60000);
-}
-export function winRate(p: WaitingPlayer): number {
-  const total = p.total_wins + p.total_losses;
-  return total === 0 ? 0.5 : p.total_wins / total;
-}
-export function isRested(p: WaitingPlayer, now: Date, minRestMin: number): boolean {
-  if (minRestMin <= 0 || !p.last_finished) return true;
-  return minutesSince(p.last_finished, now) >= minRestMin;
-}
-
-export function priorityScore(p: WaitingPlayer, maxGames: number, now: Date, cfg: MatchConfig): number {
-  const gamesDeficit = maxGames - p.games_played;
-  const waitMin = minutesSince(p.waiting_since, now);
-  return cfg.wGames * gamesDeficit + cfg.wWait * waitMin;
-}
-
-export function sortByPriority(pool: WaitingPlayer[], now: Date, cfg: MatchConfig): WaitingPlayer[] {
-  const maxGames = pool.reduce((m, p) => Math.max(m, p.games_played), 0);
-  return [...pool].sort((a, b) => {
-    const diff = priorityScore(b, maxGames, now, cfg) - priorityScore(a, maxGames, now, cfg);
-    if (diff !== 0) return diff;
-    return parseSqlDate(a.waiting_since).getTime() - parseSqlDate(b.waiting_since).getTime();
-  });
-}
-
-export function tiersByDistanceFrom(level: Level): Level[] {
-  const anchorIdx = LEVEL_ORDER.indexOf(level);
-  return LEVEL_ORDER.filter((l) => l !== level).sort((a, b) => {
-    const da = Math.abs(LEVEL_ORDER.indexOf(a) - anchorIdx);
-    const dbb = Math.abs(LEVEL_ORDER.indexOf(b) - anchorIdx);
-    if (da !== dbb) return da - dbb;
-    return LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b);
-  });
-}
-
-// Order candidates for the anchor: closest today-win count first, then avoid
-// recent group-mates, then keep the wait order (the list comes in wait order).
-function orderForAnchor(list: WaitingPlayer[], anchor: WaitingPlayer, avoid: Set<number>): WaitingPlayer[] {
-  return list
-    .map((p, i) => ({ p, i }))
-    .sort((a, b) => {
-      const da = Math.abs(a.p.session_wins - anchor.session_wins);
-      const db = Math.abs(b.p.session_wins - anchor.session_wins);
-      if (da !== db) return da - db;                       // nearest win count
-      const aa = avoid.has(a.p.player_id) ? 1 : 0;
-      const bb = avoid.has(b.p.player_id) ? 1 : 0;
-      if (aa !== bb) return aa - bb;                       // not-recently-grouped first
-      return a.i - b.i;                                    // longest wait first
-    })
-    .map((x) => x.p);
-}
-
-export function selectGroup(
-  sorted: WaitingPlayer[],
-  need: number,
-  recent: PartnerMap = {},
-  pairs: PairMap = {}
-): WaitingPlayer[] | null {
-  // A player with a forced partner only plays when that partner is available too.
-  const ids = new Set(sorted.map((p) => p.player_id));
-  const pool = sorted.filter((p) => pairs[p.player_id] == null || ids.has(pairs[p.player_id]));
-  if (pool.length < need) return null;
-  const byId = new Map(pool.map((p) => [p.player_id, p]));
-
-  // Candidates in priority order: the anchor (longest wait), their custom group,
-  // then same level by closeness of today's wins, then the nearest levels.
-  const anchor = pool[0];
-  const avoid = new Set(recent[anchor.player_id] ?? []);
-  const order: WaitingPlayer[] = [anchor];
-  if (anchor.group_id != null) order.push(...pool.filter((p) => p !== anchor && p.group_id === anchor.group_id));
-  order.push(...orderForAnchor(pool.filter((p) => p.level === anchor.level && !order.includes(p)), anchor, avoid));
-  for (const lvl of tiersByDistanceFrom(anchor.level)) {
-    order.push(...orderForAnchor(pool.filter((p) => p.level === lvl && !order.includes(p)), anchor, avoid));
+/** Adds one match to the history counts. */
+export function addToHistory(h: History, team1: number[], team2: number[]): void {
+  const bump = (m: Map<string, number>, a: number, b: number) => m.set(key(a, b), (m.get(key(a, b)) ?? 0) + 1);
+  for (const team of [team1, team2]) {
+    for (let i = 0; i < team.length; i++) for (let j = i + 1; j < team.length; j++) bump(h.partners, team[i], team[j]);
   }
+  for (const a of team1) for (const b of team2) bump(h.opponents, a, b);
+}
 
-  // Forced partners become one unit of two.
-  const units: WaitingPlayer[][] = [];
-  const seen = new Set<number>();
-  for (const p of order) {
-    if (seen.has(p.player_id)) continue;
-    const mateId = pairs[p.player_id];
-    const mate = mateId != null ? byId.get(mateId) : undefined;
-    const unit = mate && !seen.has(mate.player_id) ? [p, mate] : [p];
-    unit.forEach((x) => seen.add(x.player_id));
-    units.push(unit);
+/** Priority order: left-over players first, then fewest games, then longest wait. */
+export function sortByPriority(list: Candidate[]): Candidate[] {
+  return [...list].sort((a, b) =>
+    Number(b.carryOver) - Number(a.carryOver) ||
+    a.games - b.games ||
+    a.waitingSince - b.waitingSince ||
+    a.id - b.id
+  );
+}
+
+/** Penalty for repeating partners (counts a lot) and opponents (counts a little). */
+function repeatCost(h: History, team1: number[], team2: number[]): number {
+  let cost = 0;
+  for (const team of [team1, team2]) {
+    for (let i = 0; i < team.length; i++) for (let j = i + 1; j < team.length; j++) cost += 3 * (h.partners.get(key(team[i], team[j])) ?? 0);
   }
-
-  // First combination (in priority order) that fills the match exactly and includes the anchor.
-  const pick = (i: number, size: number, chosen: WaitingPlayer[][]): WaitingPlayer[][] | null => {
-    if (size === need) return chosen;
-    if (i >= units.length) return null;
-    if (size + units[i].length <= need) {
-      const r = pick(i + 1, size + units[i].length, [...chosen, units[i]]);
-      if (r) return r;
-    }
-    return pick(i + 1, size, chosen);
-  };
-  if (units[0].length > need) return null;
-  const res = pick(1, units[0].length, [units[0]]);
-  return res ? res.flat() : null;
+  for (const a of team1) for (const b of team2) cost += h.opponents.get(key(a, b)) ?? 0;
+  return cost;
 }
 
-function avgWinRate(team: WaitingPlayer[]): number {
-  return team.reduce((s, p) => s + winRate(p), 0) / team.length;
+/** All ways to pick `k` items from `arr` (arr is small, so this is cheap). */
+function combos<T>(arr: T[], k: number): T[][] {
+  if (k === 0) return [[]];
+  if (arr.length < k) return [];
+  const [first, ...rest] = arr;
+  return [...combos(rest, k - 1).map((c) => [first, ...c]), ...combos(rest, k)];
 }
 
-function repeatPairs(t1: WaitingPlayer[], t2: WaitingPlayer[], partners: PartnerMap): number {
-  const paired = (a: WaitingPlayer, b: WaitingPlayer) => (partners[a.player_id]?.includes(b.player_id) ? 1 : 0);
-  let c = 0;
-  if (t1.length === 2) c += paired(t1[0], t1[1]);
-  if (t2.length === 2) c += paired(t2[0], t2[1]);
-  return c;
+type Shape = { counts: Map<Level, number>; penalty: number };
+
+/** The level shapes a match containing `level` may have. */
+function shapesFor(level: Level, size: number): Shape[] {
+  const i = li(level);
+  const lower = LEVELS[i - 1];
+  const upper = LEVELS[i + 1];
+  const shapes: Shape[] = [];
+  if (size === 4) {
+    shapes.push({ counts: new Map([[level, 4]]), penalty: 0 });
+    if (upper) shapes.push({ counts: new Map([[level, 2], [upper, 2]]), penalty: 1 });
+    if (lower) shapes.push({ counts: new Map([[lower, 2], [level, 2]]), penalty: 1 });
+  } else {
+    shapes.push({ counts: new Map([[level, 2]]), penalty: 0 });
+    if (upper) shapes.push({ counts: new Map([[level, 1], [upper, 1]]), penalty: 3 });
+    if (lower) shapes.push({ counts: new Map([[lower, 1], [level, 1]]), penalty: 3 });
+  }
+  return shapes;
 }
 
-export function balanceTeams(group: WaitingPlayer[], partners: PartnerMap = {}, pairs: PairMap = {}): { team1: WaitingPlayer[]; team2: WaitingPlayer[] } {
-  if (group.length === 2) return { team1: [group[0]], team2: [group[1]] };
+/** Valid team splits for a group of 2 or 4 that follows the level rules. */
+function splits(group: Candidate[]): [Candidate[], Candidate[]][] {
+  if (group.length === 2) return [[[group[0]], [group[1]]]];
   const [a, b, c, d] = group;
-  const all: [WaitingPlayer[], WaitingPlayer[]][] = [
-    [[a, b], [c, d]],
-    [[a, c], [b, d]],
-    [[a, d], [b, c]],
-  ];
-  // Forced partners must end up on the same team.
-  const keepsPairs = ([t1, t2]: [WaitingPlayer[], WaitingPlayer[]]) =>
-    [t1, t2].every((team) => team.every((p) => {
-      const mate = pairs[p.player_id];
-      return mate == null || !group.some((x) => x.player_id === mate) || team.some((x) => x.player_id === mate);
-    }));
-  const valid = all.filter(keepsPairs);
-  const splits = valid.length ? valid : all;
-  let best = splits[0];
-  let bestRep = Infinity;
-  let bestDiff = Infinity;
-  for (const [t1, t2] of splits) {
-    const rep = repeatPairs(t1, t2, partners);
-    const diff = Math.abs(avgWinRate(t1) - avgWinRate(t2));
-    if (rep < bestRep || (rep === bestRep && diff < bestDiff)) {
-      best = [t1, t2];
-      bestRep = rep;
-      bestDiff = diff;
-    }
-  }
-  return { team1: best[0], team2: best[1] };
+  const all: [Candidate[], Candidate[]][] = [[[a, b], [c, d]], [[a, c], [b, d]], [[a, d], [b, c]]];
+  return all.filter(([t1, t2]) => !isMixedLevels(t1.map((p) => p.level), t2.map((p) => p.level)));
 }
 
-export type MatchPlan = { team1: WaitingPlayer[]; team2: WaitingPlayer[] };
+/** Best match that includes `anchor`, or null if the level rules make it impossible. */
+function bestFor(anchor: Candidate, pool: Candidate[], size: number, h: History): Plan | null {
+  const rank = new Map(pool.map((p, i) => [p.id, i]));
+  let best: { plan: Plan; score: number } | null = null;
 
-export function planAutoQueue(
-  pool: WaitingPlayer[],
-  openCourtCount: number,
-  now: Date,
-  cfg: MatchConfig = DEFAULT_CONFIG,
-  recent: PartnerMap = {},
-  pairs: PairMap = {}
-): MatchPlan[] {
-  // Forced partners only make sense in doubles.
-  if (cfg.playersPerMatch < 4) pairs = {};
-  const eligible = pool.filter((p) => isRested(p, now, cfg.minRestMin));
-  let sorted = sortByPriority(eligible, now, cfg);
-  const plans: MatchPlan[] = [];
-  for (let court = 0; court < openCourtCount; court++) {
-    if (sorted.length < cfg.playersPerMatch) break;
-    const group = selectGroup(sorted, cfg.playersPerMatch, recent, pairs);
-    if (!group) break;
-    plans.push(balanceTeams(group, recent, pairs));
-    const chosen = new Set(group.map((p) => p.player_id));
-    sorted = sorted.filter((p) => !chosen.has(p.player_id));
+  for (const shape of shapesFor(anchor.level, size)) {
+    // For each level in the shape, pick from the top few players of that level.
+    const parts: Candidate[][][] = [];
+    let ok = true;
+    for (const [lvl, count] of shape.counts) {
+      const need = lvl === anchor.level ? count - 1 : count;
+      const options = pool.filter((p) => p.level === lvl && p.id !== anchor.id).slice(0, 6);
+      const picks = combos(options, need);
+      if (!picks.length) { ok = false; break; }
+      parts.push(picks);
+    }
+    if (!ok) continue;
+
+    // Every combination of the per-level picks.
+    let groups: Candidate[][] = [[anchor]];
+    for (const picks of parts) groups = groups.flatMap((g) => picks.map((p) => [...g, ...p]));
+
+    for (const g of groups) {
+      const prioritySum = g.reduce((s, p) => s + (rank.get(p.id) ?? 0), 0);
+      for (const [t1, t2] of splits(g)) {
+        const ids1 = t1.map((p) => p.id);
+        const ids2 = t2.map((p) => p.id);
+        const score = prioritySum + 4 * repeatCost(h, ids1, ids2) + shape.penalty;
+        if (!best || score < best.score) best = { plan: { team1: ids1, team2: ids2 }, score };
+      }
+    }
+  }
+  return best ? best.plan : null;
+}
+
+/**
+ * Builds as many rule-following matches as possible from `candidates`.
+ * The highest-priority player is always tried first; a player who can't be
+ * matched is skipped (they wait and get priority later).
+ */
+export function planMatches(candidates: Candidate[], size: number, h: History): Plan[] {
+  let pool = sortByPriority(candidates);
+  const skipped = new Set<number>();
+  const plans: Plan[] = [];
+  while (true) {
+    const anchor = pool.find((p) => !skipped.has(p.id));
+    if (!anchor || pool.length < size) break;
+    const plan = bestFor(anchor, pool, size, h);
+    if (!plan) { skipped.add(anchor.id); continue; }
+    plans.push(plan);
+    const used = new Set([...plan.team1, ...plan.team2]);
+    pool = pool.filter((p) => !used.has(p.id));
   }
   return plans;
 }
 
-export function previewNextUp(
-  pool: WaitingPlayer[],
-  now: Date,
-  cfg: MatchConfig = DEFAULT_CONFIG,
-  recent: PartnerMap = {},
-  openCourtCount = 1,
-  pairs: PairMap = {}
-): WaitingPlayer[] {
-  const plans = planAutoQueue(pool, Math.max(1, openCourtCount), now, cfg, recent, pairs);
-  if (plans.length === 0) return [];
-  return [...plans[0].team1, ...plans[0].team2];
+/**
+ * True when a match breaks the auto-match level rules (used for the
+ * "Mixed levels" warning after a manual swap).
+ */
+export function isMixedLevels(team1: Level[], team2: Level[]): boolean {
+  const all = [...team1, ...team2];
+  if (all.length === 2) return Math.abs(li(all[0]) - li(all[1])) > 1;
+  if (all.length !== 4 || team1.length !== 2) return true;
+  const idx = all.map(li);
+  const lo = Math.min(...idx);
+  const hi = Math.max(...idx);
+  if (lo === hi) return false;                          // all the same level
+  if (hi - lo !== 1) return true;                       // levels too far apart
+  const lowCount = idx.filter((x) => x === lo).length;
+  if (lowCount !== 2) return true;                      // must be 2 + 2
+  // Mirrored: each team has exactly one of each level.
+  return li(team1[0]) === li(team1[1]);
 }
