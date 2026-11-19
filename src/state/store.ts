@@ -13,7 +13,6 @@ import {
   LEVELS, addToHistory, emptyHistory, isMixedLevels, planMatches, sortByPriority,
   type Candidate, type History, type Level,
 } from '../logic/matchmaking';
-import { DEMO_DATA, DEMO_PLAYERS } from './demo-data';
 
 export { LEVELS, type Level };
 export type MatchType = 'singles' | 'doubles';
@@ -546,28 +545,3 @@ export function resetAllData(): void {
   sessionToken++;
   commit({ ...S, players: [], courts: freshCourts(), matches: [], completed: [], round: 1, queueCounter: 0, draft: emptyDraft() });
 }
-
-// ============================ demo data ============================
-/**
- * Fills the app with sample players (see demo-data.ts) and sets up every
- * Live section: 2 courts already playing, 1 queue warming up, 1 proposed
- * match waiting for Ready, and 2 players on the waiting list.
- */
-export function loadDemoData(): void {
-  const now = Date.now();
-  const players: Player[] = DEMO_PLAYERS.map((d, i) => ({
-    player_id: newId(), name: d.name, level: d.level, locked: !!d.locked,
-    wins: d.wins, losses: d.losses, games: d.wins + d.losses,
-    waitingSince: now - (DEMO_PLAYERS.length - i) * 60000, // staggered wait times
-    lastFinished: null, lastDoneRound: 0, carryOver: false,
-  }));
-  commit({ ...S, players: [...S.players, ...players] }); // creates the proposed matches
-
-  // Ready the first 3 proposals. The first 2 skip the warm-up so the courts are busy right away.
-  const firstThree = S.matches.filter((m) => m.stage === 'proposed').slice(0, 3);
-  firstThree.forEach((m) => readyMatch(m.id));
-  const skipWarmup = new Set(firstThree.slice(0, 2).map((m) => m.id));
-  commit({ ...S, matches: S.matches.map((m) => (skipWarmup.has(m.id) ? { ...m, readyAt: now - WARMUP_MS } : m)) });
-}
-
-if (DEMO_DATA) loadDemoData();

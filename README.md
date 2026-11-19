@@ -2,6 +2,11 @@
 
 A queue and court manager for open-play badminton sessions (React Native + Expo): add players, auto-match fair games by level in rounds, run live courts, and track wins, losses and games on a leaderboard.
 
+## Versions
+
+- `main`: the real app. It starts empty (no sample players), ready for a live session.
+- `demo`: the portfolio demo. It starts with sample players, courts already playing, a queue and a proposed match, so visitors can try everything right away.
+
 ## Web version
 
 The app also runs in the browser.
