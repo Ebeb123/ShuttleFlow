@@ -786,7 +786,7 @@ const CONFETTI = ['#f5c518', '#ff6b6b', '#4dabf7', '#51cf66', '#cc5de8', '#ffa94
 
 /** Confetti gently falling from the top. */
 function Confetti({ width, height }: { width: number; height: number }) {
-  const pieces = useRef(
+  const [pieces] = useState(() =>
     Array.from({ length: 22 }, (_, i) => ({
       v: new Animated.Value(0),
       x: Math.random(),
@@ -798,7 +798,7 @@ function Confetti({ width, height }: { width: number; height: number }) {
       w: rand(5, 9),
       h: rand(8, 13),
     }))
-  ).current;
+  );
   useEffect(() => {
     const anims = pieces.map((p) =>
       Animated.loop(Animated.sequence([Animated.delay(p.delay), tm(p.v, 1, p.dur, Easing.linear), tm(p.v, 0, 0)]))
@@ -828,7 +828,7 @@ function Confetti({ width, height }: { width: number; height: number }) {
 
 /** One big confetti blast shot up from under the winners. */
 function ConfettiBurst({ width, height, originX }: { width: number; height: number; originX: number }) {
-  const pieces = useRef(
+  const [pieces] = useState(() =>
     Array.from({ length: 30 }, (_, i) => ({
       v: new Animated.Value(0),
       vx: rand(-0.42, 0.42),
@@ -840,7 +840,7 @@ function ConfettiBurst({ width, height, originX }: { width: number; height: numb
       w: rand(5, 8),
       h: rand(8, 12),
     }))
-  ).current;
+  );
   useEffect(() => {
     const a = Animated.parallel(pieces.map((p) => tm(p.v, 1, p.dur, Easing.linear, p.delay)));
     a.start();

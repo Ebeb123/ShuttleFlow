@@ -415,6 +415,13 @@ export function createDraftMatch(): boolean {
   return true;
 }
 
+function slotStillValid(s: State, slot: Slot): boolean {
+  if (slot.kind === 'pool') return freePlayers(s).some((p) => p.player_id === slot.playerId);
+  if (slot.kind === 'draft') return (slot.team === 1 ? s.draft.team1 : s.draft.team2)[slot.index] === slot.playerId;
+  const m = s.matches.find((x) => x.id === slot.matchId);
+  return !!m && m.stage !== 'finished' && (slot.team === 1 ? m.team1 : m.team2)[slot.index] === slot.playerId;
+}
+
 /**
  * Swaps two players. Works between any two match seats (same match, other
  * match, on court) or a seat and the waiting list. Never touches wins,
@@ -422,6 +429,9 @@ export function createDraftMatch(): boolean {
  */
 export function swapPlayers(a: Slot, b: Slot): void {
   if (a.playerId === b.playerId) return;
+  // The screen can be a moment behind (e.g. a new match was proposed mid-drag):
+  // only swap if both players are still where the drag said they were.
+  if (!slotStillValid(S, a) || !slotStillValid(S, b)) return;
   if (a.kind === 'pool' && b.kind === 'pool') return; // both waiting: nothing to swap
   if (a.kind === 'draft' || b.kind === 'draft') {
     // "Build a match" seats trade with the waiting list, each other, or a match seat.
@@ -517,7 +527,13 @@ export function removeCourt(courtId: number): { ok: boolean; reason?: string } {
 
 export function getSettings(): AppSettings { return S.settings; }
 export function saveSettings(next: Partial<AppSettings>): void {
-  commit({ ...S, settings: { ...S.settings, ...next } });
+  const settings = { ...S.settings, ...next };
+  // Switching to singles hides the 2nd "Build a match" seat of each team:
+  // send anyone sitting there back to the waiting list so nobody disappears.
+  const draft = settings.matchType === 'singles' && (S.draft.team1[1] != null || S.draft.team2[1] != null)
+    ? withSeat(withSeat(S.draft, 1, 1, null), 2, 1, null)
+    : S.draft;
+  commit({ ...S, settings, draft });
 }
 
 // ============================ sessions ============================
