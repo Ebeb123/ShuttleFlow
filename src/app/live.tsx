@@ -1,13 +1,15 @@
 import { useState } from 'react';
-import { ScrollView, Text, View, useWindowDimensions } from 'react-native';
+import { Platform, ScrollView, Text, View, useWindowDimensions } from 'react-native';
+import { useIsFocused } from 'expo-router';
 
 import {
-  clearDraft, createDraftMatch, draftSeatCount, randomFillDraft, freePlayers, matchIsMixed, playerById, readyMatch, recordWinner, setDraftSeat, useStore,
+  clearDraft, createDraftMatch, draftSeatCount, randomFillDraft, freePlayers, matchIsMixed, playerById, gamesWarning, readyMatch, recordWinner, setDraftSeat, startGame, playersToStart, useStore,
   type Match, type State,
 } from '../state/store';
 import { isMixedLevels } from '../logic/matchmaking';
+import { Alert } from '../lib/alert';
 import { useColors } from '../theme';
-import { Button, Dialog, EmptyText, Grid, List, ListRow, Screen, Section, TextField } from '../components/ui/kit';
+import { Button, Dialog, EmptyText, FrostedCover, Glass, Grid, List, ListRow, Screen, Section, TextField } from '../components/ui/kit';
 import {
   CourtGrid, DraftCard, MatchCard, WaitingPool,
   type CourtItem, type DraftSeats, type Member, type MatchView, type WaitingItem,
@@ -15,14 +17,16 @@ import {
 import { EditButton, SwapOverlay, SwapProvider, useIsDragging, useSwap } from '../components/swap-layer';
 
 /** A player as the cards draw them (name + level). */
-function memberOf(s: State, id: number): Member {
+function memberOf(s: State, id: number, onCourt = false): Member {
   const p = playerById(s, id);
-  return { player_id: id, name: p?.name ?? 'Removed player', level: p?.level ?? 'Beginner' };
+  // Wait time shows only after "Start Game" and pauses while the player is on court.
+  const since = s.started && !onCourt && p ? p.waitingSince : undefined;
+  return { player_id: id, name: p?.name ?? 'Removed player', level: p?.level ?? 'Beginner', since, games: p?.games };
 }
 
 /** Turns a stored match (player ids) into something the cards can draw (names + levels). */
 function toView(s: State, m: Match): MatchView {
-  const member = (id: number) => memberOf(s, id);
+  const member = (id: number) => memberOf(s, id, m.stage === 'playing' || m.stage === 'finished');
   return {
     id: m.id, round: m.round, stage: m.stage, queueNo: m.queueNo, winner: m.winner,
     team1: m.team1.map(member), team2: m.team2.map(member), mixed: matchIsMixed(s, m), manual: !!m.manual,
@@ -30,10 +34,40 @@ function toView(s: State, m: Match): MatchView {
 }
 
 export default function LiveScreen() {
+  // Web: the court animations redraw through React every frame. While another tab is
+  // showing, Live is paused (not drawn) so switching tabs stays instant.
+  const focused = useIsFocused();
+  if (Platform.OS === 'web' && !focused) return <View style={{ flex: 1 }} />;
   return (
-    <SwapProvider>
-      <LiveContent />
-    </SwapProvider>
+    <View style={{ flex: 1 }}>
+      <SwapProvider>
+        <LiveContent />
+      </SwapProvider>
+      <StartGate />
+    </View>
+  );
+}
+
+/** Before "Start Game": Live is blurred and nothing runs, so every wait timer starts at the same moment. */
+function StartGate() {
+  const C = useColors();
+  const s = useStore();
+  if (s.started) return null;
+  const n = s.players.length;
+  const need = playersToStart(s);
+  const short = need - n;
+  return (
+    <FrostedCover>
+      <Glass strong radius={20} style={{ width: '100%', maxWidth: 380, padding: 22, gap: 14, alignItems: 'center' }}>
+        <Text style={{ color: C.text, fontSize: 22, fontWeight: '800', textAlign: 'center' }}>Ready to play?</Text>
+        <Text style={{ color: C.muted, fontSize: 14, textAlign: 'center' }}>
+          {short > 0
+            ? `You need at least ${need} players to start (${n} added). Add ${short} more in Admin.`
+            : `${n} players ready. Every wait timer starts at the same moment.`}
+        </Text>
+        <Button title="Start Game" onPress={startGame} disabled={short > 0} style={{ alignSelf: 'stretch' }} />
+      </Glass>
+    </FrostedCover>
   );
 }
 
@@ -62,6 +96,9 @@ function LiveContent() {
   const waiting: WaitingItem[] = freePlayers(s)
     .map((p) => ({
       player_id: p.player_id, name: p.name, level: p.level, games: p.games, priority: p.carryOver, waitingSince: p.waitingSince,
+      since: s.started ? p.waitingSince : undefined,
+      // Already played this round: they wait for the next one.
+      nextRound: s.started && p.lastDoneRound >= s.round ? s.round + 1 : undefined,
     }))
     // priority first, then fewest games, then whoever has waited longest
     .sort((a, b) => Number(b.priority) - Number(a.priority) || a.games - b.games || a.waitingSince - b.waitingSince);
@@ -81,8 +118,16 @@ function LiveContent() {
   const pickList = q ? waiting.filter((p) => p.name.toLowerCase().includes(q)) : waiting;
   function closePicker() { setPicking(null); setSearch(''); }
   function pick(playerId: number) {
-    if (picking) setDraftSeat(picking.team, picking.index, playerId);
+    if (!picking) return;
+    const { team, index } = picking;
     closePicker();
+    const seat = (team === 1 ? s.draft.team1 : s.draft.team2)[index];
+    const warning = gamesWarning({ kind: 'pool', playerId }, { kind: 'draft', team, index, playerId: seat });
+    if (!warning) { setDraftSeat(team, index, playerId); return; }
+    Alert.alert('Already played', warning, [
+      { text: 'Wait', style: 'cancel' },
+      { text: 'Replace', onPress: () => setDraftSeat(team, index, playerId) },
+    ]);
   }
   const pickingCurrent = picking ? (picking.team === 1 ? s.draft.team1 : s.draft.team2)[picking.index] : null;
 
@@ -179,7 +224,8 @@ function LiveContent() {
                   key={p.player_id}
                   title={p.name}
                   level={p.level}
-                  subtitle={[`${p.games} ${p.games === 1 ? 'game' : 'games'}`, p.priority ? 'Priority' : ''].filter(Boolean).join(' · ')}
+                  subtitle={[`${p.games} ${p.games === 1 ? 'game' : 'games'}`, p.priority ? 'Priority' : '', p.nextRound ? `Waiting for Round ${p.nextRound}` : ''].filter(Boolean).join(' · ')}
+                  wait={p.since}
                   onPress={() => pick(p.player_id)}
                   last={i === pickList.length - 1}
                 />

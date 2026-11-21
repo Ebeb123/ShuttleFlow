@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Alert } from '../lib/alert';
 
-import { addPlayer, updatePlayer, deletePlayer, deletePlayers, setLocked, setLockedMany, useStore, LEVELS, type Level, type Player } from '../state/store';
+import { addPlayer, updatePlayer, deletePlayer, deletePlayers, matchOf, setLocked, setLockedMany, useStore, LEVELS, type Level, type Player } from '../state/store';
 import { useColors } from '../theme';
 import { Avatar, Badge, Button, Card, Checkbox, Columns, Dialog, EmptyText, FieldLabel, List, ListRow, LockIcon, Screen, Section, Segmented, TextField, dismissing, levelOptions } from '../components/ui/kit';
 
@@ -12,7 +12,13 @@ const SORT_OPTIONS: { value: SortMode; label: string }[] = [{ value: 'newest', l
 export default function AdminScreen() {
   const C = useColors();
   const LEVEL_OPTIONS = levelOptions(LEVELS, C.dark);
-  const { players } = useStore(); // re-renders automatically when players change
+  const store = useStore(); // re-renders automatically when players change
+  const { players } = store;
+  // Wait timer: only after "Start Game", paused while on court.
+  const waitOf = (p: Player) => {
+    const m = matchOf(store, p.player_id);
+    return store.started && !(m && (m.stage === 'playing' || m.stage === 'finished')) ? p.waitingSince : undefined;
+  };
 
   const [name, setName] = useState('');
   const [selectedLevel, setSelectedLevel] = useState<Level>('Beginner');
@@ -124,13 +130,14 @@ export default function AdminScreen() {
                   leading={
                     <>
                       <Checkbox checked={selected.includes(p.player_id)} />
-                      <Avatar name={p.name} level={p.level} />
+                      <Avatar id={p.player_id} name={p.name} level={p.level} />
                     </>
                   }
                   title={p.name}
                   level={p.level}
                   accessory={p.locked ? <Badge text="Locked" tone="warning" /> : null}
                   subtitle={`${p.wins}W ${p.losses}L · ${p.games} ${p.games === 1 ? 'game' : 'games'}`}
+                  wait={waitOf(p)}
                   trailing={
                     <>
                       <LockToggle locked={p.locked} onPress={() => toggleLock(p)} />

@@ -9,12 +9,19 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 
-import { levelColor, useColors } from '../../theme';
+import { levelColor, useColors, type Palette } from '../../theme';
 import type { Level } from '../../state/store';
 import type { ScrollBind } from '../swap-layer';
+import { WaitTime } from '../../lib/clock';
+import { sc, UI_SCALE } from '../../lib/ui-scale';
 
 // Real blur on iOS + web. Android blur is heavy, so it gets a more opaque panel instead.
-const BLUR = Platform.OS !== 'android';
+// Browsers without backdrop-filter also get the solid fallback.
+const webBlur = () =>
+  typeof CSS !== 'undefined' && (CSS.supports('backdrop-filter', 'blur(1px)') || CSS.supports('-webkit-backdrop-filter', 'blur(1px)'));
+const BLUR = Platform.OS === 'ios' || (Platform.OS === 'web' && webBlur());
+// Blur strength: the web filter is intensity x 0.2 px, so 90-100 = 18-20px.
+const blurAmount = (strong?: boolean) => (Platform.OS === 'web' ? (strong ? 100 : 90) : strong ? 60 : 35);
 const LOGO = require('../../../assets/images/packq-logo.png');
 
 // ------------------------------------------------------------------ background + glass
@@ -43,8 +50,20 @@ export function GlassBackground() {
   );
 }
 
-/** Frosted glass panel. */
-export function Glass({ children, style, strong, radius = 20 }: {
+/**
+ * Frosted glass panel: the ONE shared glass style (like CSS .glass / .glass-strong) used by
+ * cards, the tab bar, dialogs, popups and the Live start cover. Translucent fill, blur,
+ * 1px see-through border with a brighter top edge (inner shine), soft layered shadow,
+ * rounded corners, and a solid fill where blur isn't available.
+ */
+export function glassFrame(C: Palette, radius = 20): ViewStyle {
+  return {
+    borderRadius: radius, borderWidth: 1, borderColor: C.glassBorder, borderTopColor: C.highlight,
+    boxShadow: `0 1px 2px ${C.shadow}, 0 8px 24px ${C.shadow}`,
+  };
+}
+
+export function Glass({ children, style, strong, radius = 18 }: {
   children?: ReactNode; style?: StyleProp<ViewStyle>; strong?: boolean; radius?: number;
 }) {
   const C = useColors();
@@ -52,9 +71,9 @@ export function Glass({ children, style, strong, radius = 20 }: {
   // The blur + tint layers sit behind the content (zIndex -1 inside this panel's own
   // stacking context) and ignore touches, so inputs and buttons on top stay usable.
   return (
-    <View style={[{ zIndex: 0, borderRadius: radius, overflow: 'hidden', borderWidth: 1, borderColor: C.glassBorder }, style]}>
+    <View style={[{ zIndex: 0, overflow: 'hidden' }, glassFrame(C, radius), style]}>
       {BLUR ? (
-        <BlurView pointerEvents="none" intensity={strong ? 60 : 35} tint={C.dark ? 'dark' : 'light'} style={[StyleSheet.absoluteFill, { zIndex: -1 }]} />
+        <BlurView pointerEvents="none" intensity={blurAmount(strong)} tint={C.dark ? 'dark' : 'light'} style={[StyleSheet.absoluteFill, { zIndex: -1 }]} />
       ) : null}
       <View pointerEvents="none" style={[StyleSheet.absoluteFill, { zIndex: -1, backgroundColor: fill }]} />
       {children}
@@ -66,6 +85,18 @@ export function Glass({ children, style, strong, radius = 20 }: {
 /** Wraps a tap handler so it also closes the phone keyboard: one tap does both. */
 export function dismissing<A extends unknown[]>(fn?: (...args: A) => void) {
   return (...args: A) => { Keyboard.dismiss(); fn?.(...args); };
+}
+
+/**
+ * Tapping empty page space closes the keyboard. On web a mouse click on a text box also
+ * reaches this handler, so skip it there or the box loses focus and you can't type.
+ */
+function dismissUnlessTyping(e: { nativeEvent?: unknown; target?: unknown }) {
+  if (Platform.OS === 'web') {
+    const t = ((e.nativeEvent as { target?: { tagName?: string } } | undefined)?.target ?? e.target) as { tagName?: string } | undefined;
+    if (t?.tagName === 'INPUT' || t?.tagName === 'TEXTAREA') return;
+  }
+  Keyboard.dismiss();
 }
 
 // ------------------------------------------------------------------ responsive helpers
@@ -93,7 +124,7 @@ export function Columns({ children, flex }: { children: ReactNode; flex?: number
 export function Grid({ children, min, gap = 12 }: { children: ReactNode; min: number; gap?: number }) {
   return (
     <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap }}>
-      {Children.toArray(children).map((c, i) => <View key={i} style={{ flexGrow: 1, flexBasis: min, minWidth: 0 }}>{c}</View>)}
+      {Children.toArray(children).map((c, i) => <View key={i} style={{ flexGrow: 1, flexBasis: min * UI_SCALE, minWidth: 0 }}>{c}</View>)}
     </View>
   );
 }
@@ -118,7 +149,9 @@ export function Screen({ title, subtitle, children, scrollEnabled = true, overla
   // Stay below the status bar / notch, and scale the header for small phones and tablets.
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
-  const sz = width < 380 ? HEADER.sm : width >= 768 ? HEADER.lg : HEADER.md;
+  const base = width < 380 ? HEADER.sm : width >= 768 ? HEADER.lg : HEADER.md;
+  // Bigger on big screens (see lib/ui-scale).
+  const sz = { pad: sc(base.pad), top: sc(base.top), logo: sc(base.logo), title: sc(base.title), sub: sc(base.sub), gap: sc(base.gap) };
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
       <GlassBackground />
@@ -140,7 +173,7 @@ export function Screen({ title, subtitle, children, scrollEnabled = true, overla
         {...scrollBind}
       >
         {/* Tapping an empty part of the page closes the keyboard (buttons still get their taps). */}
-        <View style={[s.page, { gap: GAPS[width < 380 ? 'sm' : width >= 768 ? 'lg' : 'md'] }]} onStartShouldSetResponder={() => true} onResponderRelease={() => Keyboard.dismiss()}>
+        <View style={[s.page, { gap: GAPS[width < 380 ? 'sm' : width >= 768 ? 'lg' : 'md'] }]} onStartShouldSetResponder={() => true} onResponderRelease={dismissUnlessTyping}>
         <View style={[s.header, { gap: sz.gap }]}>
           <View style={[s.logoTile, { width: sz.logo, height: sz.logo, borderRadius: sz.logo * 0.29 }]}>
             <Image source={LOGO} style={{ width: sz.logo - 4, height: sz.logo - 4 }} resizeMode="contain" />
@@ -187,8 +220,8 @@ export function List({ children, style }: { children: ReactNode; style?: StylePr
   return <Glass style={style}>{children}</Glass>;
 }
 
-export function ListRow({ leading, title, level, accessory, subtitle, trailing, onPress, last, dimmed }: {
-  leading?: ReactNode; title: string; level?: Level; accessory?: ReactNode; subtitle?: string;
+export function ListRow({ leading, title, level, accessory, subtitle, wait, trailing, onPress, last, dimmed }: {
+  leading?: ReactNode; title: string; level?: Level; accessory?: ReactNode; subtitle?: string; /** waiting since (ms): adds a live mm:ss */ wait?: number;
   trailing?: ReactNode; onPress?: () => void; last?: boolean; dimmed?: boolean;
 }) {
   const C = useColors();
@@ -202,7 +235,12 @@ export function ListRow({ leading, title, level, accessory, subtitle, trailing, 
             {level ? <LevelBadge level={level} /> : null}
             {accessory}
           </View>
-          {subtitle ? <Text style={[s.rowSub, { color: C.muted }]}>{subtitle}</Text> : null}
+          {subtitle || wait != null ? (
+            <Text style={[s.rowSub, { color: C.muted }]}>
+              {subtitle}
+              {wait != null ? <WaitTime since={wait} prefix={subtitle ? ' · Waiting ' : 'Waiting '} /> : null}
+            </Text>
+          ) : null}
         </View>
         {trailing ? <View style={s.trailing}>{trailing}</View> : null}
       </View>
@@ -289,9 +327,9 @@ export function Segmented<T extends string | number>({ options, value, onChange 
       {options.map((o) => {
         const on = o.value === value;
         return (
-          <Pressable key={String(o.value)} onPress={dismissing(() => onChange(o.value))} style={[s.seg, on && [s.segOn, { backgroundColor: C.raised }]]}>
+          <Pressable key={String(o.value)} onPress={dismissing(() => onChange(o.value))} style={[s.seg, on && [s.segOn, { backgroundColor: C.primary }]]}>
             {o.dot ? <View style={[s.segDot, { backgroundColor: o.dot }]} /> : null}
-            <Text style={[s.segText, small && { fontSize: 12 }, { color: on ? C.text : C.muted }, on && { fontWeight: '600' }]}>
+            <Text style={[s.segText, small && { fontSize: 12 }, { color: on ? C.onPrimary : C.text }, on && { fontWeight: '700' }]}>
               {o.label}
             </Text>
           </Pressable>
@@ -348,16 +386,39 @@ export function Checkbox({ checked }: { checked: boolean }) {
   );
 }
 
-const initials = (name: string) =>
-  name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w.charAt(0).toUpperCase()).join('');
+// Avatar colour = the player's level colour; this palette is only a fallback when no level is known.
+const AVATAR_COLORS = ['#1f7cff', '#14b8a6', '#8b5cf6', '#f97316', '#ec4899', '#22c55e', '#0ea5e9', '#e11d48', '#a16207', '#6366f1'];
+const GOLD = { bg: '#f5c518', ring: '#fff3c4', icon: '#7a5a00' };
+function avatarColor(id: number | undefined, name: string): string {
+  const n = id ?? [...name].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7);
+  return AVATAR_COLORS[n % AVATAR_COLORS.length];
+}
 
-/** Initials circle. With a level it uses that level's colour (green / yellow / orange / red). */
-export function Avatar({ name, level, size = 36 }: { name: string; level?: Level; size?: number }) {
-  const C = useColors();
-  const c = level ? levelColor(level, C.dark) : null;
+/** Head-and-shoulders silhouette drawn with plain views (no image files). */
+function PersonIcon({ size, color }: { size: number; color: string }) {
+  const head = size * 0.36;
+  const body = size * 0.68;
   return (
-    <View style={[s.avatar, { width: size, height: size, borderRadius: size / 2, backgroundColor: c ? c.bg : C.accentSoft }, c && { borderWidth: 1.5, borderColor: c.dot }]}>
-      <Text style={[s.avatarText, { color: c ? c.text : C.accent }, size < 34 && { fontSize: 11 }]}>{initials(name)}</Text>
+    <View style={{ width: size, height: size, alignItems: 'center' }}>
+      <View style={{ position: 'absolute', top: size * 0.17, width: head, height: head, borderRadius: head / 2, backgroundColor: color }} />
+      <View style={{ position: 'absolute', top: size * 0.58, width: body, height: body, borderRadius: body / 2, backgroundColor: color }} />
+    </View>
+  );
+}
+
+/** Person avatar in the player's level colour (Beginner green, Intermediate yellow, Advance orange, Pro red). `gold` = winner variant. */
+export function Avatar({ id, name, level, size: baseSize = 36, gold }: { id?: number; name: string; level?: Level; size?: number; gold?: boolean }) {
+  const C = useColors();
+  const size = sc(baseSize);
+  const bg = gold ? GOLD.bg : level ? levelColor(level, C.dark).dot : avatarColor(id, name);
+  // Dark figure on the light yellow/gold circles, white on the others, so the icon always stands out.
+  const icon = gold ? GOLD.icon : level === 'Intermediate' ? '#5a4500' : 'rgba(255,255,255,0.95)';
+  return (
+    <View
+      accessibilityLabel={level ? `${name}, ${level}` : name}
+      style={[s.avatar, { width: size, height: size, borderRadius: size / 2, backgroundColor: bg, borderWidth: 2, borderColor: gold ? GOLD.ring : C.glassBorder }]}
+    >
+      <PersonIcon size={size - 4} color={icon} />
     </View>
   );
 }
@@ -483,6 +544,18 @@ export function SwapIcon({ color, size = 16 }: { color: string; size?: number })
   );
 }
 
+/** Full-screen frosted cover over a screen (Live "Start Game"). Blocks touches underneath. */
+export function FrostedCover({ children }: { children?: ReactNode }) {
+  const C = useColors();
+  return (
+    <View style={[StyleSheet.absoluteFill, s.cover]}>
+      {BLUR ? <BlurView pointerEvents="none" intensity={Platform.OS === 'web' ? 100 : 45} tint={C.dark ? 'dark' : 'light'} style={StyleSheet.absoluteFill} /> : null}
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: BLUR ? (C.dark ? 'rgba(2,6,14,0.35)' : 'rgba(240,244,250,0.35)') : C.glassStrong }]} />
+      {children}
+    </View>
+  );
+}
+
 // ------------------------------------------------------------------ dialog
 export function Dialog({ visible, onClose, title, subtitle, children, actions }: {
   visible: boolean; onClose: () => void; title: string; subtitle?: string; children?: ReactNode; actions?: ReactNode;
@@ -507,7 +580,7 @@ export function Dialog({ visible, onClose, title, subtitle, children, actions }:
 }
 
 const s = StyleSheet.create({
-  content: { padding: 20, width: '100%', maxWidth: 1200, alignSelf: 'center' },
+  content: { padding: 20, width: '100%', maxWidth: 2000, alignSelf: 'center' },
   page: { gap: 28 },
   header: { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: -8 },
   logoTile: { width: 48, height: 48, borderRadius: 14, backgroundColor: '#060a14', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
@@ -552,7 +625,6 @@ const s = StyleSheet.create({
   check: { width: 20, height: 20, borderRadius: 6, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center' },
   checkMark: { width: 6, height: 10, borderRightWidth: 2, borderBottomWidth: 2, transform: [{ rotate: '45deg' }], marginTop: -2 },
   avatar: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
-  avatarText: { fontSize: 13, fontWeight: '700' },
   badge: { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 2 },
   badgeText: { fontSize: 12, fontWeight: '600' },
   levelBadge: { flexDirection: 'row', alignItems: 'center', gap: 5, flexShrink: 0 },
@@ -560,6 +632,7 @@ const s = StyleSheet.create({
   dot: { width: 10, height: 10, borderRadius: 5 },
 
   backdrop: { flex: 1, justifyContent: 'center', padding: 20 },
+  cover: { zIndex: 50, alignItems: 'center', justifyContent: 'center', padding: 24 },
   dialog: { width: '100%', maxWidth: 480, alignSelf: 'center', padding: 20, gap: 16 },
   dialogTitle: { fontSize: 18, fontWeight: '700' },
   dialogSub: { fontSize: 14, marginTop: 4 },

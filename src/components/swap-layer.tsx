@@ -21,9 +21,11 @@ type ViewRef = NonNullable<ElementRef<typeof View>>;
 type ScrollRef = NonNullable<ElementRef<typeof ScrollView>>;
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 
-import { slotKey, swapPlayers, type Level, type Slot } from '../state/store';
+import { gamesWarning, slotKey, swapPlayers, type Level, type Slot } from '../state/store';
+import { Alert } from '../lib/alert';
 import { useColors } from '../theme';
 import { Avatar, CheckIcon, LevelBadge, PencilIcon, SwapIcon } from './ui/kit';
+import { WaitTime } from '../lib/clock';
 
 const ND = Platform.OS !== 'web'; // native animation driver isn't available on web
 
@@ -50,7 +52,8 @@ export type ScrollBind = {
 };
 
 type Rect = { x: number; y: number; w: number; h: number };
-export type ChipPlayer = { player_id: number; name: string; level: Level };
+/** `since` = waiting since (ms); set only while the player is off court and the game has started. */
+export type ChipPlayer = { player_id: number; name: string; level: Level; since?: number; games?: number };
 type Entry = { ref: RefObject<ViewRef | null>; slot: Slot; player?: ChipPlayer; target: boolean; look?: Look };
 
 function measure(v: ViewRef | null | undefined): Promise<Rect | null> {
@@ -175,6 +178,16 @@ export function SwapProvider({ children }: { children: ReactNode }) {
     setEditMode((v) => !v);
   }
 
+  /** Asks first when the swap gives someone an extra game ahead of others (see gamesWarning). */
+  function confirmGames(a: Slot, b: Slot, go: () => void, cancel?: () => void) {
+    const warning = gamesWarning(a, b);
+    if (!warning) { go(); return; }
+    Alert.alert('Already played', warning, [
+      { text: 'Wait', style: 'cancel', onPress: cancel },
+      { text: 'Replace', onPress: go },
+    ]);
+  }
+
   async function runSwap(a: { slot: Slot; player: ChipPlayer }, b: { slot: Slot; player: ChipPlayer }) {
     busy.current = true;
     const ka = slotKey(a.slot);
@@ -239,7 +252,7 @@ export function SwapProvider({ children }: { children: ReactNode }) {
       return;
     }
     setSelected([slotKey(first.slot), key]);
-    runSwap(first, { slot, player });
+    confirmGames(first.slot, slot, () => runSwap(first, { slot, player }), clearSelection);
   }
 
   // ---------------- drag-to-replace ----------------
@@ -326,7 +339,7 @@ export function SwapProvider({ children }: { children: ReactNode }) {
     const reset = () => { hoverRef.current = null; dragStore.set({ hoverKey: null, dragKey: null, drag: null }); };
     if (target) {
       reset(); // drop the lifted copy first so the release feels instant
-      swapPlayers(d.slot, target.slot);
+      confirmGames(d.slot, target.slot, () => swapPlayers(d.slot, target.slot));
       return;
     }
     // Released somewhere else: snap back, no changes.
@@ -406,14 +419,20 @@ function ChipFace({ player, note, ring, warmDelay, look }: {
 }) {
   const C = useColors();
   const avatar = warmDelay != null
-    ? <Jog delay={warmDelay}><Avatar name={player.name} level={player.level} size={30} /></Jog>
-    : <Avatar name={player.name} level={player.level} size={30} />;
+    ? <Jog delay={warmDelay}><Avatar id={player.player_id} name={player.name} level={player.level} size={30} /></Jog>
+    : <Avatar id={player.player_id} name={player.name} level={player.level} size={30} />;
   const frame = [{ backgroundColor: C.raised, borderColor: ring ?? C.line }, ring ? { borderWidth: 2 } : null];
   if (look === 'compact') {
     return (
       <View style={[st.face, st.faceCompact, ...frame]}>
         <Text style={[st.name, st.nameCompact, { color: C.text }]}>{player.name}</Text>
         <LevelBadge level={player.level} />
+        {player.games != null || player.since != null ? (
+          <Text style={[st.note, { color: C.muted }]}>
+            {player.games != null ? `${player.games} ${player.games === 1 ? 'game' : 'games'}` : ''}
+            {player.since != null ? <WaitTime since={player.since} prefix={player.games != null ? ' · ' : ''} /> : null}
+          </Text>
+        ) : null}
       </View>
     );
   }
@@ -424,6 +443,7 @@ function ChipFace({ player, note, ring, warmDelay, look }: {
         <View style={st.nameWide}>
           <Text style={[st.name, st.nameWideText, { color: C.text }]}>{player.name}</Text>
           {note ? <Text style={[st.note, { color: C.muted, textAlign: 'left' }]}>{note}</Text> : null}
+          {player.since != null ? <WaitTime since={player.since} style={[st.note, { color: C.muted, textAlign: 'left' }]} /> : null}
         </View>
         <LevelBadge level={player.level} />
       </View>
@@ -435,6 +455,7 @@ function ChipFace({ player, note, ring, warmDelay, look }: {
       <Text style={[st.name, { color: C.text }]}>{player.name}</Text>
       <LevelBadge level={player.level} />
       {note ? <Text style={[st.note, { color: C.muted }]}>{note}</Text> : null}
+      {player.since != null ? <WaitTime since={player.since} style={[st.note, { color: C.muted }]} /> : null}
     </View>
   );
 }

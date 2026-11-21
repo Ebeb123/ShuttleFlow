@@ -11,7 +11,8 @@ import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-na
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useColors } from '../theme';
-import { Glass, GlassBackground } from './ui/kit';
+import { GlassBackground } from './ui/kit';
+import { sc } from '../lib/ui-scale';
 
 /** Bar sizes: small phones, normal phones, tablets. */
 const BAR = {
@@ -32,7 +33,7 @@ export default function AppTabs() {
   return (
     <View style={[styles.page, { backgroundColor: C.bg }]}>
       <GlassBackground />
-      <View style={[styles.phone, { maxWidth: wide ? 1200 : 480 }]}>
+      <View style={[styles.phone, { maxWidth: wide ? 2000 : 480 }]}>
         <Tabs>
           <TabSlot style={{ flex: 1 }} />
           <TabList asChild>
@@ -60,15 +61,16 @@ export default function AppTabs() {
 function BottomBar({ children, style, ...props }: TabListProps) {
   const sz = useBarSize();
   const insets = useSafeAreaInsets();
+  const C = useColors();
   return (
     <View
       {...props}
       style={[styles.barWrap, { left: sz.side, right: sz.side, bottom: Math.max(sz.side, insets.bottom + 6) }]}
       pointerEvents="box-none"
     >
-      <Glass radius={sz.radius} strong style={[styles.bar, { width: '100%', maxWidth: sz.maxW }]}>
+      <View style={[styles.bar, { width: '100%', maxWidth: sz.maxW, borderRadius: sz.radius, backgroundColor: C.tabBar, borderColor: C.tabBorder }]}>
         <View style={styles.barRow}>{children}</View>
-      </Glass>
+      </View>
     </View>
   );
 }
@@ -79,8 +81,8 @@ function TabButton({ children, isFocused, ref, ...props }: TabTriggerSlotProps) 
   return (
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     <Pressable ref={ref as any} {...props} style={({ pressed }) => [styles.tab, pressed && { opacity: 0.7 }]}>
-      <View style={[styles.tabInner, { paddingVertical: sz.padV, paddingHorizontal: sz.padH, borderRadius: sz.radius - 6 }, isFocused && { backgroundColor: C.accentSoft }]}>
-        <Text style={[styles.tabText, { fontSize: sz.font, color: isFocused ? C.accent : C.muted }, isFocused && { fontWeight: '700' }]}>{children}</Text>
+      <View style={[styles.tabInner, { paddingVertical: sc(sz.padV), paddingHorizontal: sz.padH, borderRadius: sz.radius - 6 }, isFocused && { backgroundColor: C.primary }]}>
+        <Text style={[styles.tabText, { fontSize: sc(sz.font), color: isFocused ? C.onPrimary : C.text }, isFocused && { fontWeight: '700' }]}>{children}</Text>
       </View>
     </Pressable>
   );
@@ -90,7 +92,7 @@ const styles = StyleSheet.create({
   page: { flex: 1, alignItems: 'center' },
   phone: { flex: 1, width: '100%' },
   barWrap: { position: 'absolute', alignItems: 'center' },
-  bar: { shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 16, shadowOffset: { width: 0, height: 6 } },
+  bar: { borderWidth: 1.5, boxShadow: '0 6px 20px rgba(0,0,0,0.45)' },
   barRow: { flexDirection: 'row', padding: 6 },
   tab: { flex: 1, minWidth: 0 },
   tabInner: { alignItems: 'center', justifyContent: 'center' },
