@@ -7,7 +7,13 @@
 //   - all 4 players the same level            → B+B vs B+B, I+I vs I+I, …
 //   - 2 players of a level + 2 of the next one → B+I vs B+I, I+A vs I+A, A+P vs A+P
 //     and every team gets one of each level (mirrored teams).
-//   Anything else (e.g. Beginner with Advance) is never auto-matched.
+//   Anything else (e.g. Beginner with Advance) is not auto-matched, with one exception:
+//   when the free players can't make any fair match (e.g. 1 Pro + 3 Advance, or
+//   3 Intermediate + 1 Advance + 3 Pro), they are matched with the closest level
+//   (at most one level away) so nobody waits forever. A player left out of a
+//   round gets this first, before others play again. This fallback is only
+//   for Intermediate, Advance and Pro. The one exception: a Beginner who has
+//   waited 20+ min may be matched with Intermediates.
 // Singles: same level first, an adjacent level only as a fallback.
 // ---------------------------------------------------------------------------
 export const LEVELS = ['Beginner', 'Intermediate', 'Advance', 'Pro'] as const;
@@ -22,6 +28,7 @@ export type Candidate = {
   games: number;        // games played this session (fewer = higher priority)
   waitingSince: number; // ms timestamp (earlier = higher priority)
   carryOver: boolean;   // left out of the previous round → top priority
+  waitedLong?: boolean; // waiting 20+ min: may be matched one level away (even a Beginner with Intermediates)
 };
 
 /** How often two players were partners / opponents this session. */
@@ -131,6 +138,47 @@ function bestFor(anchor: Candidate, pool: Candidate[], size: number, h: History)
   return best ? best.plan : null;
 }
 
+/** All team splits of a group of 2 or 4, with no level filter. */
+function allSplits(group: Candidate[]): [Candidate[], Candidate[]][] {
+  if (group.length === 2) return [[[group[0]], [group[1]]]];
+  const [a, b, c, d] = group;
+  return [[[a, b], [c, d]], [[a, c], [b, d]], [[a, d], [b, c]]];
+}
+
+/**
+ * Fallback for a left-out player with nobody at a fair level: closest levels
+ * (max one level away), then the most even teams, then priority.
+ */
+function closestFor(anchor: Candidate, pool: Candidate[], size: number, h: History): Plan | null {
+  // Beginners only get this after a long wait, and then only with Intermediates.
+  if (anchor.level === 'Beginner' && !anchor.waitedLong) return null;
+  const gap = (p: Candidate) => Math.abs(li(p.level) - li(anchor.level));
+  const rank = new Map(pool.map((p, i) => [p.id, i]));
+  // pool is already in priority order and sort is stable, so ties keep priority.
+  const sum = (t: Candidate[]) => t.reduce((s, p) => s + li(p.level), 0);
+  let best: { plan: Plan; score: number } | null = null;
+  // Try one direction at a time (anchor's level + the level above, or + the level below),
+  // so a match never spans more than two neighbouring levels (no Intermediate with Pro).
+  for (const dir of [1, -1]) {
+    const other = LEVELS[li(anchor.level) + dir];
+    if (!other || other === 'Beginner') continue; // never pull Beginners in from above
+    const options = pool.filter((p) => p.id !== anchor.id && (p.level === anchor.level || p.level === other)).sort((a, b) => gap(a) - gap(b)).slice(0, 6);
+    if (options.length < size - 1) continue;
+  for (const picks of combos(options, size - 1)) {
+    const g = [anchor, ...picks];
+    const levelCost = picks.reduce((s, p) => s + gap(p), 0);
+    const prioritySum = picks.reduce((s, p) => s + (rank.get(p.id) ?? 0), 0);
+    for (const [t1, t2] of allSplits(g)) {
+      const ids1 = t1.map((p) => p.id);
+      const ids2 = t2.map((p) => p.id);
+      const score = 20 * levelCost + 10 * Math.abs(sum(t1) - sum(t2)) + prioritySum + 4 * repeatCost(h, ids1, ids2);
+      if (!best || score < best.score) best = { plan: { team1: ids1, team2: ids2 }, score };
+    }
+  }
+  }
+  return best ? best.plan : null;
+}
+
 /**
  * Builds as many rule-following matches as possible from `candidates`.
  * The highest-priority player is always tried first; a player who can't be
@@ -143,8 +191,25 @@ export function planMatches(candidates: Candidate[], size: number, h: History): 
   while (true) {
     const anchor = pool.find((p) => !skipped.has(p.id));
     if (!anchor || pool.length < size) break;
-    const plan = bestFor(anchor, pool, size, h);
+    // A player left out last round who still can't get a fair match gets the closest one instead.
+    // Left out last round, or waiting 20+ min (e.g. the odd Pro or Beginner): if there's
+    // no fair match, they get the closest one before others play again.
+    const plan = bestFor(anchor, pool, size, h) ?? (anchor.carryOver || anchor.waitedLong ? closestFor(anchor, pool, size, h) : null);
     if (!plan) { skipped.add(anchor.id); continue; }
+    plans.push(plan);
+    const used = new Set([...plan.team1, ...plan.team2]);
+    pool = pool.filter((p) => !used.has(p.id));
+  }
+
+  // Second pass: whoever is still waiting has no fair match among the free players
+  // (e.g. 3 Intermediate + 1 Advance + 3 Pro). Rather than everyone waiting forever,
+  // match them with the closest level that is available (never Beginners).
+  const stuck = new Set<number>();
+  while (pool.length >= size) {
+    const anchor = pool.find((p) => !stuck.has(p.id));
+    if (!anchor) break;
+    const plan = closestFor(anchor, pool, size, h);
+    if (!plan) { stuck.add(anchor.id); continue; }
     plans.push(plan);
     const used = new Set([...plan.team1, ...plan.team2]);
     pool = pool.filter((p) => !used.has(p.id));

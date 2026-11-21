@@ -4,6 +4,7 @@ import { Animated, Easing, Platform, Pressable, StyleSheet, Text, View } from 'r
 import { LEVELS, type Level, type Stage } from '../state/store';
 import { levelColor, type Palette } from '../theme';
 import { Badge, Button, DiceIcon, EmptyText, Glass, Grid, LevelBadge, List } from './ui/kit';
+import { sc } from '../lib/ui-scale';
 import { DropSeat, EditButton, PlayerChip, useSwap } from './swap-layer';
 
 const ND = Platform.OS !== 'web'; // native driver isn't available on web
@@ -331,7 +332,7 @@ function PlayerSprite({ name, level, xy, swing, facing, icon, phase, nameW }: {
 }
 
 // ================================================================ shared match data
-export type Member = { player_id: number; name: string; level: Level; note?: string };
+export type Member = { player_id: number; name: string; level: Level; note?: string; since?: number; games?: number };
 /** A match ready to draw: player ids already turned into names + levels. */
 export type MatchView = {
   id: number;
@@ -1014,14 +1015,15 @@ function CourtCard({ C, item, width, onTeamPress }: {
           </Text>
         </View>
         {m && (
-          <View style={styles.status}>
-            <View style={[styles.statusDot, { backgroundColor: finished ? GOLD : C.green }]} />
-            <Text style={[styles.statusText, { color: C.text }]}>{finished ? 'Game over' : 'Playing'}</Text>
+          <View style={styles.statusCol}>
+            <View style={styles.status}>
+              <View style={[styles.statusDot, { backgroundColor: finished ? GOLD : C.green }]} />
+              <Text style={[styles.statusText, { color: C.text }]}>{finished ? 'Game over' : 'Playing'}</Text>
+            </View>
+            {m.mixed && !finished ? <MixedBadge /> : null}
           </View>
         )}
       </View>
-      {m?.mixed ? <View style={{ flexDirection: 'row' }}><MixedBadge /></View> : null}
-
       {sw > 0 && (
         <View style={styles.floor}>
           {finished && m ? (
@@ -1052,7 +1054,7 @@ function CourtCard({ C, item, width, onTeamPress }: {
 export function CourtGrid({ C, items, onTeamPress }: { C: Palette; items: CourtItem[]; onTeamPress: (m: MatchView, team: 1 | 2) => void }) {
   const [w, setW] = useState(0);
   // As many courts side by side as fit (each at least ~330px wide, up to 3).
-  const cols = Math.max(1, Math.min(items.length, Math.floor((w + GAP) / (330 + GAP)), 3));
+  const cols = Math.max(1, Math.min(items.length, Math.floor((w + GAP) / (sc(330) + GAP)), 3));
   const cardW = Math.floor((w - (cols - 1) * GAP) / cols);
   return (
     <View onLayout={(e) => setW(e.nativeEvent.layout.width)}>
@@ -1108,7 +1110,7 @@ export function MatchCard({ C, match, onReady }: { C: Palette; match: MatchView;
 }
 
 // ================================================================ waiting list
-export type WaitingItem = Member & { games: number; priority: boolean; waitingSince: number };
+export type WaitingItem = Member & { games: number; priority: boolean; waitingSince: number; /** already played this round: next game is in this round */ nextRound?: number };
 
 /** Everyone not in a match, grouped by level. Press and hold a player to drag them into a match. */
 export function WaitingPool({ C, players }: { C: Palette; players: WaitingItem[] }) {
@@ -1132,6 +1134,7 @@ export function WaitingPool({ C, players }: { C: Palette; players: WaitingItem[]
                   note={[
                     `${p.games} ${p.games === 1 ? 'game' : 'games'}`,
                     p.priority ? 'Priority' : '',
+                    p.nextRound ? `Waiting for Round ${p.nextRound}` : '',
                   ].filter(Boolean).join(' · ')}
                   draggable
                 />
@@ -1176,10 +1179,11 @@ const styles = StyleSheet.create({
   // cards
   card: { padding: CARD_PAD, gap: 14 },
   matchCard: { padding: 14, gap: 12 },
-  cardHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  cardHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 44 },
   cardTitle: { fontSize: 17, fontWeight: '700' },
   cardSub: { fontSize: 13, marginTop: 2 },
   status: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  statusCol: { alignItems: 'flex-end', gap: 4 },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
   statusText: { fontSize: 15, fontWeight: '600', fontVariant: ['tabular-nums'] },
   hint: { fontSize: 13, textAlign: 'center' },

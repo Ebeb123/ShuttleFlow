@@ -1,15 +1,14 @@
-import { useColorScheme } from 'react-native';
-import type { Level } from './state/store';
+import { useStore, type Level } from './state/store';
 
-// Colours come from the app logo: navy #273555 and teal #548994.
-export const BRAND = { navy: '#273555', teal: '#548994' };
+// Colours come from the PACK-Q logo: navy-black #060a14, electric blue #1f7cff, wolf silver #c8ccd6.
+export const BRAND = { navy: '#060a14', blue: '#1f7cff', silver: '#c8ccd6' };
 
 export type Palette = {
   dark: boolean;
   /** Background gradient (top → bottom) and the soft glows behind the glass. */
   bg: string; bg2: string; glow1: string; glow2: string;
-  /** Frosted glass panels. */
-  glass: string; glassStrong: string; glassBorder: string;
+  /** Frosted glass panels (the shared .glass / .glass-strong tokens), border, top-edge shine, shadow. */
+  glass: string; glassStrong: string; glassBorder: string; highlight: string; shadow: string;
   /** Inputs / subtle fills / selected segment / hairlines. */
   card: string; card2: string; raised: string; line: string;
   text: string; muted: string;
@@ -17,33 +16,81 @@ export type Palette = {
   primary: string; onPrimary: string;
   accent: string; accentSoft: string;
   green: string; red: string; amber: string;
+  /** Tab bar: solid colour that stands out from the background, plus its edge. */
+  tabBar: string; tabBorder: string;
 };
 
-const LIGHT: Palette = {
-  dark: false,
-  bg: '#eef3f6', bg2: '#d6e6ea', glow1: BRAND.teal, glow2: BRAND.navy,
-  glass: 'rgba(255,255,255,0.48)', glassStrong: 'rgba(255,255,255,0.86)', glassBorder: 'rgba(255,255,255,0.8)',
-  card: 'rgba(255,255,255,0.7)', card2: 'rgba(39,53,85,0.07)', raised: 'rgba(255,255,255,0.96)', line: 'rgba(39,53,85,0.12)',
-  text: '#1c2740', muted: '#5b6a80',
-  primary: BRAND.navy, onPrimary: '#ffffff',
-  accent: '#3f7884', accentSoft: 'rgba(84,137,148,0.16)',
-  green: '#2f8f63', red: '#c94a4a', amber: '#b7791f',
-};
-
-const DARK: Palette = {
-  dark: true,
-  bg: '#0f1626', bg2: '#1b2a44', glow1: BRAND.teal, glow2: '#3b5a8f',
-  glass: 'rgba(24,34,56,0.42)', glassStrong: 'rgba(22,32,52,0.9)', glassBorder: 'rgba(255,255,255,0.12)',
+const DARK_BASE = {
+  dark: true, highlight: 'rgba(255,255,255,0.14)', shadow: 'rgba(0,0,0,0.45)',
   card: 'rgba(255,255,255,0.06)', card2: 'rgba(255,255,255,0.08)', raised: 'rgba(255,255,255,0.16)', line: 'rgba(255,255,255,0.1)',
-  text: '#e8eef5', muted: '#94a2b6',
-  primary: '#6aa8b5', onPrimary: '#0f1626',
-  accent: '#7dbcc9', accentSoft: 'rgba(125,188,201,0.18)',
-  green: '#6fcf97', red: '#ef7a7a', amber: '#e3b04b',
+  text: '#eef2f8', muted: '#a3adbd', green: '#6fcf97', red: '#ef7a7a', amber: '#e3b04b',
+} as const;
+const LIGHT_BASE = {
+  dark: false, highlight: 'rgba(255,255,255,0.9)', shadow: 'rgba(16,30,60,0.14)',
+  card: 'rgba(255,255,255,0.72)', card2: 'rgba(6,10,20,0.06)', raised: 'rgba(255,255,255,0.96)', line: 'rgba(6,10,20,0.12)',
+  text: '#0c1526', muted: '#4f5c70', green: '#2f8f63', red: '#c94a4a', amber: '#b7791f',
+} as const;
+
+export type BgId = 'midnight' | 'frost' | 'electric' | 'steel' | 'contrast';
+
+/** The 5 background presets for Settings. Every one keeps text readable on its glass. */
+export const BACKGROUNDS: Record<BgId, { label: string; palette: Palette }> = {
+  midnight: {
+    label: 'Midnight',
+    palette: {
+      ...DARK_BASE,
+      bg: '#060a14', bg2: '#0f1d3a', glow1: BRAND.blue, glow2: '#3a5bd9',
+      glass: 'rgba(20,32,58,0.42)', glassStrong: 'rgba(14,24,46,0.92)', glassBorder: 'rgba(255,255,255,0.12)',
+      primary: '#4a95ff', onPrimary: '#060a14', accent: '#6eaeff', accentSoft: 'rgba(110,174,255,0.18)', tabBar: '#18294d', tabBorder: 'rgba(110,174,255,0.45)',
+    },
+  },
+  frost: {
+    label: 'Frost',
+    palette: {
+      ...LIGHT_BASE,
+      bg: '#f1f4fa', bg2: '#d8e2f2', glow1: BRAND.blue, glow2: BRAND.silver,
+      glass: 'rgba(255,255,255,0.5)', glassStrong: 'rgba(255,255,255,0.9)', glassBorder: 'rgba(255,255,255,0.85)',
+      primary: '#1557c9', onPrimary: '#ffffff', accent: '#1a5fd6', accentSoft: 'rgba(31,124,255,0.14)', tabBar: '#ffffff', tabBorder: 'rgba(21,87,201,0.35)',
+    },
+  },
+  electric: {
+    label: 'Electric',
+    palette: {
+      ...DARK_BASE,
+      bg: '#0a1a5c', bg2: '#1458d8', glow1: '#5fb2ff', glow2: '#7a5cff',
+      glass: 'rgba(10,24,80,0.4)', glassStrong: 'rgba(10,22,74,0.92)', glassBorder: 'rgba(255,255,255,0.2)',
+      muted: '#c2cdea', primary: '#ffffff', onPrimary: '#0a1a5c', accent: '#9fd0ff', accentSoft: 'rgba(159,208,255,0.2)', tabBar: '#050d2e', tabBorder: 'rgba(159,208,255,0.55)',
+    },
+  },
+  steel: {
+    label: 'Steel',
+    palette: {
+      ...DARK_BASE,
+      bg: '#161c26', bg2: '#2a3444', glow1: BRAND.silver, glow2: '#5a7eb0',
+      glass: 'rgba(40,50,66,0.45)', glassStrong: 'rgba(30,38,52,0.94)', glassBorder: 'rgba(200,204,214,0.16)',
+      muted: '#a9b2c0', primary: '#8fb3e3', onPrimary: '#161c26', accent: '#a9c4ea', accentSoft: 'rgba(169,196,234,0.16)', tabBar: '#0b0f16', tabBorder: 'rgba(169,196,234,0.4)',
+    },
+  },
+  contrast: {
+    label: 'High contrast',
+    palette: {
+      ...DARK_BASE,
+      bg: '#000000', bg2: '#040814', glow1: BRAND.blue, glow2: '#ffffff',
+      glass: 'rgba(255,255,255,0.08)', glassStrong: 'rgba(8,12,22,0.97)', glassBorder: 'rgba(255,255,255,0.55)',
+      highlight: 'rgba(255,255,255,0.25)', line: 'rgba(255,255,255,0.35)',
+      text: '#ffffff', muted: '#dde3ec', primary: '#4da3ff', onPrimary: '#000000', accent: '#7cc0ff', accentSoft: 'rgba(124,192,255,0.22)',
+      green: '#7dffa8', red: '#ff8a8a', amber: '#ffd166', tabBar: '#000000', tabBorder: '#ffffff',
+    },
+  },
 };
+
+/** The chosen background; Electric until another one is picked. */
+export function useBgId(): BgId {
+  return useStore().settings.bg ?? 'electric';
+}
 
 export function useColors(): Palette {
-  const scheme = useColorScheme();
-  return scheme === 'dark' ? DARK : LIGHT;
+  return BACKGROUNDS[useBgId()].palette;
 }
 
 // Level colour coding: Beginner green, Intermediate yellow, Advance orange, Pro red.

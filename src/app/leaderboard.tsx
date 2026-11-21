@@ -1,18 +1,20 @@
 import { useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Platform, StyleSheet, Text, View, type TextStyle } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 
 import { useStore, type Player } from '../state/store';
 import { useColors } from '../theme';
-import { EmptyText, LevelBadge, List, Screen, Section, Segmented } from '../components/ui/kit';
+import { sc } from '../lib/ui-scale';
+import { Avatar, EmptyText, LevelBadge, List, Screen, Section, Segmented } from '../components/ui/kit';
 
 type Tab = 'wins' | 'games';
 const TABS: { value: Tab; label: string }[] = [{ value: 'wins', label: 'Most Wins' }, { value: 'games', label: 'Most Games' }];
 
-// #1 gold, #2 silver, #3 bronze. Everyone else gets a gray row.
+// #1 gold, #2 silver, #3 bronze: metal gradients with a shine, so each is clearly different.
 const MEDALS = [
-  { color: '#d4a106', soft: 'rgba(245,197,24,0.18)', label: 'Gold' },
-  { color: '#8e98a3', soft: 'rgba(170,178,189,0.22)', label: 'Silver' },
-  { color: '#b06a2c', soft: 'rgba(205,127,50,0.2)', label: 'Bronze' },
+  { label: 'Gold', colors: ['#f7d774', '#fff3c4', '#c99a06'] as const, edge: '#a87f00', ink: '#5a4300', soft: 'rgba(245,197,24,0.16)' },
+  { label: 'Silver', colors: ['#C9D1D9', '#F4F7FA', '#8E99A6'] as const, edge: '#6f7a87', ink: '#2c3540', soft: 'rgba(201,209,217,0.2)' },
+  { label: 'Bronze', colors: ['#e0a46e', '#f8d9bc', '#9a5a24'] as const, edge: '#7a4518', ink: '#4a2a0c', soft: 'rgba(205,127,50,0.16)' },
 ];
 
 const winRate = (p: Player) => (p.games > 0 ? p.wins / p.games : 0);
@@ -25,6 +27,10 @@ function sortPlayers(list: Player[], tab: Tab): Player[] {
       : b.games - a.games || b.wins - a.wins || a.name.localeCompare(b.name)
   );
 }
+
+/** Long names get a slightly smaller font so the card stays short. They wrap, never cut. */
+const nameSize = (name: string) => sc(name.length > 22 ? 13 : name.length > 14 ? 14 : 15);
+const WRAP = (Platform.OS === 'web' ? { overflowWrap: 'anywhere', wordBreak: 'break-word' } : {}) as TextStyle;
 
 export default function LeaderboardScreen() {
   const C = useColors();
@@ -42,35 +48,33 @@ export default function LeaderboardScreen() {
           ) : (
             ranked.map((p, i) => {
               const medal = MEDALS[i];
-              const last = i === ranked.length - 1;
+              const size = nameSize(p.name);
               return (
                 <View
                   key={p.player_id}
                   style={[
                     styles.row,
-                    { backgroundColor: medal ? medal.soft : C.card2 },
-                    medal && { borderLeftWidth: 5, borderLeftColor: medal.color },
-                    !last && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.line },
+                    medal && { backgroundColor: medal.soft },
+                    i < ranked.length - 1 && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.line },
                   ]}
                 >
-                  <View style={[styles.rank, { backgroundColor: medal ? medal.color : C.card, borderColor: medal ? medal.color : C.line }]}>
-                    <Text style={[styles.rankText, { color: medal ? '#fff' : C.muted }]}>{i + 1}</Text>
-                  </View>
-                  <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
+                  <Avatar id={p.player_id} name={p.name} level={p.level} size={32} gold={i === 0 && p.games > 0} />
+                  <View style={styles.main}>
                     <View style={styles.nameLine}>
-                      <Text style={[styles.name, { color: medal ? C.text : C.muted }]}>{p.name}</Text>
-                      <LevelBadge level={p.level} />
-                      {medal ? (
-                        <View style={[styles.medal, { backgroundColor: medal.color }]}>
-                          <Text style={styles.medalText}>{medal.label}</Text>
-                        </View>
-                      ) : null}
+                      <Text style={[styles.name, WRAP, { color: C.text, fontSize: size, lineHeight: Math.round(size * 1.15) }]}>{p.name}</Text>
+                      {medal ? <Medal medal={medal} rank={i + 1} /> : <Text style={[styles.rankPlain, { color: C.muted, borderColor: C.line }]}>{i + 1}</Text>}
                     </View>
-                    <View style={styles.stats}>
-                      <Stat label="Wins" value={p.wins} color={medal ? C.green : C.muted} strong={tab === 'wins'} />
-                      <Stat label="Losses" value={p.losses} color={medal ? C.red : C.muted} />
-                      <Stat label="Games" value={p.games} color={medal ? C.text : C.muted} strong={tab === 'games'} />
-                      <Stat label="Win rate" value={`${Math.round(winRate(p) * 100)}%`} color={medal ? C.accent : C.muted} />
+                    <View style={styles.meta}>
+                      <LevelBadge level={p.level} />
+                      <Text style={[styles.stats, { color: C.muted }]}>
+                        <Text style={{ color: C.green, fontWeight: tab === 'wins' ? '800' : '700' }}>{p.wins}W</Text>
+                        {'  '}
+                        <Text style={{ color: C.red, fontWeight: '700' }}>{p.losses}L</Text>
+                        {'  '}
+                        <Text style={{ color: C.text, fontWeight: tab === 'games' ? '800' : '600' }}>{p.games} {p.games === 1 ? 'game' : 'games'}</Text>
+                        {'  '}
+                        {Math.round(winRate(p) * 100)}%
+                      </Text>
                     </View>
                   </View>
                 </View>
@@ -83,26 +87,26 @@ export default function LeaderboardScreen() {
   );
 }
 
-function Stat({ label, value, color, strong }: { label: string; value: number | string; color: string; strong?: boolean }) {
-  const C = useColors();
+/** Round metal medal with a shine and the rank number, sitting right beside the name. */
+function Medal({ medal, rank }: { medal: (typeof MEDALS)[number]; rank: number }) {
   return (
-    <View style={styles.stat}>
-      <Text style={[styles.statValue, { color }, strong && { fontSize: 18 }]}>{value}</Text>
-      <Text style={[styles.statLabel, { color: C.muted }]}>{label}</Text>
+    <View accessibilityLabel={`${medal.label} medal, rank ${rank}`} style={[styles.medal, { borderColor: medal.edge }]}>
+      <LinearGradient colors={medal.colors} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} />
+      <View pointerEvents="none" style={styles.shine} />
+      <Text style={[styles.medalText, { color: medal.ink }]}>{rank}</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingHorizontal: 14 },
-  rank: { width: 34, height: 34, borderRadius: 17, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
-  rankText: { fontSize: 15, fontWeight: '800', fontVariant: ['tabular-nums'] },
-  nameLine: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6 },
-  medal: { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 2 },
-  medalText: { color: '#fff', fontSize: 12, fontWeight: '800' },
-  name: { fontSize: 16, fontWeight: '700', flexShrink: 1 },
-  stats: { flexDirection: 'row', flexWrap: 'wrap', gap: 14 },
-  stat: { alignItems: 'flex-start' },
-  statValue: { fontSize: 15, fontWeight: '700', fontVariant: ['tabular-nums'] },
-  statLabel: { fontSize: 11 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8, paddingHorizontal: 12 },
+  main: { flex: 1, minWidth: 0, gap: 3 },
+  nameLine: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  name: { flex: 1, minWidth: 0, fontWeight: '700' },
+  meta: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
+  stats: { fontSize: 12, fontVariant: ['tabular-nums'] },
+  medal: { width: 26, height: 26, borderRadius: 13, borderWidth: 1.5, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
+  shine: { position: 'absolute', top: 2, left: 4, width: 12, height: 7, borderRadius: 6, backgroundColor: 'rgba(255,255,255,0.75)', transform: [{ rotate: '-25deg' }] },
+  medalText: { fontSize: 13, fontWeight: '900', fontVariant: ['tabular-nums'] },
+  rankPlain: { minWidth: 26, textAlign: 'center', fontSize: 12, fontWeight: '800', borderWidth: 1, borderRadius: 13, paddingVertical: 4, overflow: 'hidden' },
 });

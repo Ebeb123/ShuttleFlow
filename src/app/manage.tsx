@@ -1,10 +1,11 @@
 import { useCallback, useState } from 'react';
-import { Linking, StyleSheet, Text, View } from 'react-native';
+import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { Alert } from '../lib/alert';
 import { useFocusEffect } from 'expo-router';
 
 import { getCourts, addCourt, setCourtStatus, removeCourt, startNewSession, resetAllData, getSettings, saveSettings, type Court, type AppSettings } from '../state/store';
-import { useColors } from '../theme';
+import { BACKGROUNDS, useBgId, useColors, type BgId } from '../theme';
 import { BodyText, Button, Card, Columns, EmptyText, List, ListRow, Screen, Section, Segmented, SettingRow, StatusDot, Stepper, TextField } from '../components/ui/kit';
 
 const STATUS_LABEL: Record<Court['status'], string> = { open: 'Open', occupied: 'In use', closed: 'Closed' };
@@ -12,6 +13,7 @@ const PORTFOLIO_URL = 'https://aebriam.vercel.app';
 
 export default function SettingsScreen() {
   const C = useColors();
+  const bgId = useBgId();
 
   const [courts, setCourts] = useState<Court[]>([]);
   const [newCourtName, setNewCourtName] = useState('');
@@ -23,7 +25,7 @@ export default function SettingsScreen() {
   function handleNewSession() {
     Alert.alert(
       'Start new session?',
-      'This clears every queue, court match and round, and removes every player who is not locked. Locked players stay, but their wins, losses and games go back to 0.',
+      'This clears every queue, court match and round, and removes every player who is not locked. Locked players keep their names, but their wins, losses, games and waiting time go back to 0. Timers start again when you press Start Game on Live.',
       [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Start new session', style: 'destructive', onPress: () => { startNewSession(); refresh(); Alert.alert('Done', 'A new session has started.'); } },
@@ -95,9 +97,39 @@ export default function SettingsScreen() {
             </View>
           </SettingRow>
           <View style={[styles.divider, { backgroundColor: C.line }]} />
-          <SettingRow label="Rest between games" hint={settings.restMin === 0 ? 'Players can go straight back on' : 'Players sit out at least this long'}>
+          <SettingRow label="Rest between games" hint={settings.restMin === 0 ? 'Players can go straight back on' : settings.restMin === 2 ? 'Standard match play: 2 min' : 'Players sit out at least this long'}>
             <Stepper value={settings.restMin} min={0} max={30} step={1} format={(v) => (v === 0 ? 'None' : `${v} min`)} onChange={(v) => update({ restMin: v })} />
           </SettingRow>
+        </Card>
+      </Section>
+
+      <Section title="Background" footer="Colours from the PACK-Q logo. Saved on this device.">
+        <Card>
+          <View style={styles.swatches}>
+            {(Object.keys(BACKGROUNDS) as BgId[]).map((id) => {
+              const p = BACKGROUNDS[id].palette;
+              const on = id === bgId;
+              return (
+                <Pressable
+                  key={id}
+                  onPress={() => update({ bg: id })}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: on }}
+                  accessibilityLabel={`${BACKGROUNDS[id].label} background`}
+                  style={({ pressed }) => [styles.swatchItem, pressed && { opacity: 0.7 }]}
+                >
+                  <View style={[styles.swatch, { borderColor: on ? C.accent : C.line, borderWidth: on ? 3 : 1 }]}>
+                    <LinearGradient colors={[p.bg, p.bg2]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} />
+                    <View style={[styles.swatchGlass, { backgroundColor: p.glassStrong, borderColor: p.glassBorder }]}>
+                      <Text style={{ color: p.text, fontSize: 11, fontWeight: '800' }}>Aa</Text>
+                      <View style={[styles.swatchDot, { backgroundColor: p.primary }]} />
+                    </View>
+                  </View>
+                  <Text style={[styles.swatchLabel, { color: on ? C.text : C.muted, fontWeight: on ? '800' : '600' }]}>{BACKGROUNDS[id].label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
         </Card>
       </Section>
 
@@ -137,4 +169,10 @@ const styles = StyleSheet.create({
   credit: { fontSize: 12, textAlign: 'center', marginTop: -8, opacity: 0.85 },
   creditLink: { fontWeight: '700', textDecorationLine: 'underline' },
   divider: { height: StyleSheet.hairlineWidth },
+  swatches: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, justifyContent: 'space-between' },
+  swatchItem: { alignItems: 'center', gap: 6, width: 64 },
+  swatch: { width: 60, height: 60, borderRadius: 16, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
+  swatchGlass: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 7, paddingVertical: 4, borderRadius: 8, borderWidth: 1 },
+  swatchDot: { width: 8, height: 8, borderRadius: 4 },
+  swatchLabel: { fontSize: 11, textAlign: 'center' },
 });

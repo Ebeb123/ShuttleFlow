@@ -1,7 +1,7 @@
 // state/store.ts
 // ---------------------------------------------------------------------------
-// The whole app's data, kept IN MEMORY only (no database, nothing saved).
-// Closing or reloading the app starts fresh.
+// The whole app's data. It is saved on the device (lib/persist) after every
+// change and restored when the app opens, so closing the app keeps players.
 //
 // Screens read it with the useStore() hook (re-renders on every change) or
 // with the small get…() helpers. Every change goes through an action below,
@@ -13,6 +13,8 @@ import {
   LEVELS, addToHistory, emptyHistory, isMixedLevels, planMatches, sortByPriority,
   type Candidate, type History, type Level,
 } from '../logic/matchmaking';
+import { loadSaved, scheduleSave } from '../lib/persist';
+import type { BgId } from '../theme';
 
 export { LEVELS, type Level };
 export type MatchType = 'singles' | 'doubles';
@@ -30,6 +32,8 @@ export type Player = {
   lastFinished: number | null;
   lastDoneRound: number;     // highest round they finished a game in
   carryOver: boolean;        // couldn't be matched last round → priority
+  /** Queue number they lost when their queued match was broken up; their next match takes it back. */
+  heldQueue?: number | null;
 };
 
 /**
@@ -57,7 +61,7 @@ const emptyDraft = (): Draft => ({ team1: [null, null], team2: [null, null] });
 
 type StoredCourt = { court_id: number; name: string; closed: boolean };
 export type Court = { court_id: number; name: string; status: CourtStatus };
-export type AppSettings = { matchType: MatchType; restMin: number };
+export type AppSettings = { matchType: MatchType; restMin: number; bg?: BgId };
 
 export type State = {
   players: Player[];
@@ -68,6 +72,8 @@ export type State = {
   queueCounter: number;
   settings: AppSettings;
   draft: Draft;
+  /** False after "Start new session" until "Start Game" is pressed on Live: no timers, no matches. */
+  started: boolean;
 };
 
 /** How long the warm-up shows at minimum before a queue goes on court. */
@@ -78,6 +84,16 @@ export const CELEBRATE_MS = 3500;
 // ============================ store plumbing ============================
 let nextId = 1;
 const newId = () => nextId++;
+
+/** Courts in number order: "Court 2" before "Court 10", "4" before "5". */
+const sortCourts = (cs: StoredCourt[]) =>
+  [...cs].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+
+/** After this long on the waiting list, a player may be matched one level away (Beginners with Intermediates too). */
+export const LONG_WAIT_MIN = 20;
+
+/** Standard match play: 2 minutes' rest between games. */
+export const STANDARD_REST_MIN = 2;
 
 function freshCourts(): StoredCourt[] {
   return [{ court_id: newId(), name: 'Court 1', closed: false }, { court_id: newId(), name: 'Court 2', closed: false }];
@@ -90,19 +106,67 @@ let S: State = {
   completed: [],
   round: 1,
   queueCounter: 0,
-  settings: { matchType: 'doubles', restMin: 0 },
+  settings: { matchType: 'doubles', restMin: STANDARD_REST_MIN },
   draft: emptyDraft(),
+  started: false,
 };
 /** Bumped on new session / reset so old celebration timers are ignored. */
 let sessionToken = 0;
 
+// ---- saved on the device (one versioned key), restored when the app opens ----
+const SAVE_VERSION = 1;
+const SETTINGS_VERSION = 2;
+const onCourtIds = (s: State) =>
+  new Set(s.matches.filter((m) => m.stage === 'playing' || m.stage === 'finished').flatMap((m) => [...m.team1, ...m.team2]));
+
+function restore() {
+  const text = loadSaved();
+  if (!text) return;
+  try {
+    const saved = JSON.parse(text) as { v: number; nextId: number; state: State; sv?: number };
+    if (saved.v !== SAVE_VERSION || !Array.isArray(saved.state?.players)) return;
+    const st = saved.state;
+    const now = Date.now();
+    // A winner celebration can't resume after a restart: finish it now and send those players back to waiting.
+    const done = st.matches.filter((m) => m.stage === 'finished');
+    const back = new Set(done.flatMap((m) => [...m.team1, ...m.team2]));
+    S = {
+      ...S,
+      ...st,
+      // Saves made before the 2-minute standard rest existed get the new default once.
+      settings: { ...S.settings, ...st.settings, ...((saved.sv ?? 1) < SETTINGS_VERSION ? { restMin: STANDARD_REST_MIN } : null) },
+      courts: sortCourts(st.courts ?? S.courts),
+      draft: st.draft ?? emptyDraft(),
+      started: !!st.started,
+      matches: st.matches.filter((m) => m.stage !== 'finished'),
+      players: st.players.map((p) => (back.has(p.player_id) ? { ...p, waitingSince: now, lastFinished: now } : p)),
+    };
+    nextId = Math.max(nextId, saved.nextId ?? 1);
+  } catch {
+    // Unreadable save: start fresh.
+  }
+}
+restore();
+
 const listeners = new Set<() => void>();
-function emit() { listeners.forEach((l) => l()); }
+function emit() {
+  listeners.forEach((l) => l());
+  scheduleSave(() => JSON.stringify({ v: SAVE_VERSION, sv: SETTINGS_VERSION, nextId, state: S }));
+}
 function subscribe(l: () => void) { listeners.add(l); return () => { listeners.delete(l); }; }
 
 /** Replace the state, run the automatic steps, then tell React. */
 function commit(next: State) {
-  S = maintain(next, Date.now());
+  const now = Date.now();
+  // Wait timers pause on court and restart from 0 when a player comes off (e.g. swapped out).
+  const before = onCourtIds(S);
+  const after = onCourtIds(next);
+  const left = [...before].filter((id) => !after.has(id));
+  if (left.length) {
+    const ids = new Set(left);
+    next = { ...next, players: next.players.map((p) => (ids.has(p.player_id) ? { ...p, waitingSince: now } : p)) };
+  }
+  S = maintain(next, now);
   emit();
 }
 
@@ -169,7 +233,8 @@ function maintain(input: State, now: number): State {
     s = { ...s, matches: s.matches.map((m) => (m.id === next.id ? { ...m, stage: 'playing', courtId: c.court_id, startedAt: now } : m)) };
   }
 
-  // 2 + 3) Proposals and rounds.
+  // 2 + 3) Proposals and rounds (only once the game has started).
+  if (!s.started) return s;
   const size = s.settings.matchType === 'singles' ? 2 : 4;
   for (let guard = 0; guard < 50; guard++) {
     const R = s.round;
@@ -177,6 +242,7 @@ function maintain(input: State, now: number): State {
     const eligible = s.players.filter((p) => free.has(p.player_id) && lastRound(s, p) < R && rested(s, p, now));
     const cands: Candidate[] = eligible.map((p) => ({
       id: p.player_id, level: p.level, games: p.games, waitingSince: p.waitingSince, carryOver: p.carryOver,
+      waitedLong: now - p.waitingSince >= LONG_WAIT_MIN * 60000,
     }));
     const plans = planMatches(cands, size, historyOf(s));
     if (plans.length) {
@@ -253,13 +319,65 @@ function removePlayers(s: State, ids: number[]): { next: State; deleted: number;
     if (!p || p.locked || (m && (m.stage === 'playing' || m.stage === 'finished'))) { skipped++; continue; }
     ok.add(id);
   }
-  // A proposed or queued match that loses a player is broken up; the others go back to waiting.
-  const broken = new Set(s.matches.filter((m) => [...m.team1, ...m.team2].some((id) => ok.has(id))).map((m) => m.id));
+  // A proposed or queued match that loses a player keeps its place in the queue.
+  // The seat goes to the best waiting player: same level, then same level still
+  // resting, then one level up/down (never mixing Beginners). Only if nobody fits
+  // is the match broken up and the others go back to waiting.
+  const now = Date.now();
+  const waitingNow = sortByPriority(
+    freePlayers(s)
+      .filter((p) => !ok.has(p.player_id))
+      .map((p) => ({ id: p.player_id, level: p.level, games: p.games, waitingSince: p.waitingSince, carryOver: p.carryOver }))
+  );
+  const isRested = (id: number) => { const p = playerById(s, id); return !!p && rested(s, p, now); };
+  const near = (a: Level, b: Level) =>
+    a !== 'Beginner' && b !== 'Beginner' && Math.abs(LEVELS.indexOf(a) - LEVELS.indexOf(b)) === 1;
+  const taken = new Set<number>();
+  const broken = new Set<number>();
+  const bumped: number[] = [];
+  const matches = s.matches.map((m) => {
+    if (![...m.team1, ...m.team2].some((id) => ok.has(id))) return m;
+    const fill = (team: number[]) => team.map((id) => {
+      if (!ok.has(id)) return id;
+      const lvl = playerById(s, id)?.level ?? 'Beginner';
+      // Never hand someone an extra game: the substitute must not have played this match's round yet.
+      const owes = (pid: number) => (playerById(s, pid)?.lastDoneRound ?? 0) < m.round;
+      const free = waitingNow.filter((c) => !taken.has(c.id) && owes(c.id));
+      const sub =
+        free.find((c) => c.level === lvl && isRested(c.id)) ??
+        free.find((c) => c.level === lvl) ??
+        free.find((c) => near(c.level, lvl) && isRested(c.id));
+      if (sub) { taken.add(sub.id); return sub.id; }
+      // Nobody free: borrow a same-level player from a NEWER queue/proposal (it has waited
+      // the least). That newer match is broken up instead and its players go to the top
+      // of the waiting list.
+      const order = (x: Match) => (x.stage === 'proposed' ? 1e9 + x.id : x.queueNo ?? 0);
+      const donors = s.matches
+        .filter((x) => x.id !== m.id && (x.stage === 'proposed' || x.stage === 'queued') && order(x) > order(m) && !broken.has(x.id))
+        .sort((x, y) => order(y) - order(x));
+      for (const d of donors) {
+        const pickId = [...d.team1, ...d.team2].find((pid) => !ok.has(pid) && !taken.has(pid) && owes(pid) && playerById(s, pid)?.level === lvl);
+        if (pickId != null) { taken.add(pickId); broken.add(d.id); bumped.push(...[...d.team1, ...d.team2].filter((x) => x !== pickId)); return pickId; }
+      }
+      broken.add(m.id);
+      return id;
+    });
+    return { ...m, team1: fill(m.team1), team2: fill(m.team2) };
+  });
+  // Players left over from a broken match get priority for the next match, and if it was
+  // a queued match they keep its queue number: their next match takes that spot back.
+  const priority = new Map<number, number | null>();
+  for (const m of s.matches) {
+    if (!broken.has(m.id)) continue;
+    for (const id of [...m.team1, ...m.team2]) if (!taken.has(id) && !ok.has(id)) priority.set(id, m.stage === 'queued' ? m.queueNo : null);
+  }
   return {
     next: {
       ...s,
-      players: s.players.filter((p) => !ok.has(p.player_id)),
-      matches: s.matches.filter((m) => !broken.has(m.id)),
+      players: s.players
+        .filter((p) => !ok.has(p.player_id))
+        .map((p) => (priority.has(p.player_id) ? { ...p, carryOver: true, heldQueue: priority.get(p.player_id) ?? p.heldQueue ?? null } : p)),
+      matches: matches.filter((m) => !broken.has(m.id)),
       draft: mapDraft(s.draft, (id) => (id != null && ok.has(id) ? null : id)),
     },
     deleted: ok.size,
@@ -288,11 +406,19 @@ export function deletePlayers(ids: number[]): { deleted: number; skipped: number
 export function readyMatch(matchId: number): void {
   const m = S.matches.find((x) => x.id === matchId);
   if (!m || m.stage !== 'proposed') return;
-  const queueNo = S.queueCounter + 1;
+  // A player who lost their queue spot (someone left) gets it back: this match takes
+  // their old queue number, so it goes on court in that place instead of at the back.
+  const ids = new Set([...m.team1, ...m.team2]);
+  const inUse = new Set(S.matches.filter((x) => x.stage !== 'proposed').map((x) => x.queueNo));
+  const held = S.players
+    .filter((p) => ids.has(p.player_id) && p.heldQueue != null && !inUse.has(p.heldQueue))
+    .map((p) => p.heldQueue as number);
+  const queueNo = held.length ? Math.min(...held) : S.queueCounter + 1;
   commit({
     ...S,
-    queueCounter: queueNo,
+    queueCounter: Math.max(S.queueCounter, queueNo),
     matches: S.matches.map((x) => (x.id === matchId ? { ...x, stage: 'queued', queueNo, readyAt: Date.now() } : x)),
+    players: S.players.map((p) => (ids.has(p.player_id) && p.heldQueue != null ? { ...p, heldQueue: null } : p)),
   });
 }
 
@@ -398,6 +524,40 @@ export function randomFillDraft(): void {
   let d = start;
   (best as { pick: number[] }).pick.forEach((r, i) => { d = withSeat(d, seats[i].team, seats[i].index, pool[r].id); });
   commit({ ...S, draft: d });
+}
+
+/**
+ * Warning text when a swap would put a player who has played MORE games into a
+ * match (or Build-a-match seats) with players who have played fewer, e.g. a
+ * 2nd game while others are still waiting for their 1st in Round 1. null = fine.
+ */
+export function gamesWarning(a: Slot, b: Slot): string | null {
+  const s = S;
+  if (a.kind === 'match' && b.kind === 'match' && a.matchId === b.matchId) return null; // same match: nobody joins
+  if (a.kind === 'draft' && b.kind === 'draft') return null;
+  const othersAt = (dest: Slot, moverId: number): number[] => {
+    if (dest.kind === 'pool') return [];
+    let ids: (number | null)[];
+    if (dest.kind === 'draft') {
+      const n = draftSeatCount(s);
+      ids = [...s.draft.team1.slice(0, n), ...s.draft.team2.slice(0, n)];
+    } else {
+      const m = s.matches.find((x) => x.id === dest.matchId);
+      ids = m ? [...m.team1, ...m.team2] : [];
+    }
+    return ids.filter((id): id is number => id != null && id !== dest.playerId && id !== moverId);
+  };
+  const check = (moverId: number | null, dest: Slot): string | null => {
+    if (moverId == null) return null;
+    const mover = playerById(s, moverId);
+    if (!mover) return null;
+    const fewer = othersAt(dest, moverId).map((id) => playerById(s, id)).filter((p): p is Player => !!p && p.games < mover.games);
+    if (!fewer.length) return null;
+    const g = (n: number) => `${n} ${n === 1 ? 'game' : 'games'}`;
+    const who = fewer.length === 1 ? `${fewer[0].name} has played ${g(fewer[0].games)}` : `${fewer.map((p) => p.name).join(', ')} have played fewer`;
+    return `${mover.name} has already played ${g(mover.games)}, but ${who}. Wait for Round ${s.round + 1}, or replace anyway?`;
+  };
+  return check(a.playerId, b) ?? check(b.playerId, a);
 }
 
 /** Turns the filled seats into a proposed match. Returns false if a seat is empty. */
@@ -511,7 +671,7 @@ export function getCourts(): Court[] {
   });
 }
 export function addCourt(name: string): void {
-  commit({ ...S, courts: [...S.courts, { court_id: newId(), name, closed: false }] });
+  commit({ ...S, courts: sortCourts([...S.courts, { court_id: newId(), name, closed: false }]) });
 }
 export function setCourtStatus(courtId: number, status: CourtStatus): void {
   commit({ ...S, courts: S.courts.map((c) => (c.court_id === courtId ? { ...c, closed: status === 'closed' } : c)) });
@@ -550,14 +710,27 @@ export function startNewSession(): void {
     round: 1,
     queueCounter: 0,
     draft: emptyDraft(),
+    started: false, // no timers until "Start Game"
     players: S.players
       .filter((p) => p.locked)
-      .map((p) => ({ ...p, wins: 0, losses: 0, games: 0, waitingSince: now, lastFinished: null, lastDoneRound: 0, carryOver: false })),
+      .map((p) => ({ ...p, wins: 0, losses: 0, games: 0, waitingSince: now, lastFinished: null, lastDoneRound: 0, carryOver: false, heldQueue: null })),
   });
+}
+
+/** "Start Game" on Live: every current player's wait timer starts at the same moment. */
+/** Players needed before "Start Game": one full match (4 for doubles, 2 for singles). */
+export function playersToStart(s: State): number {
+  return s.settings.matchType === 'singles' ? 2 : 4;
+}
+
+export function startGame(): void {
+  if (S.started || S.players.length < playersToStart(S)) return;
+  const now = Date.now();
+  commit({ ...S, started: true, players: S.players.map((p) => ({ ...p, waitingSince: now })) });
 }
 
 /** Deletes everything (players, courts, matches) and starts with 2 empty courts. */
 export function resetAllData(): void {
   sessionToken++;
-  commit({ ...S, players: [], courts: freshCourts(), matches: [], completed: [], round: 1, queueCounter: 0, draft: emptyDraft() });
+  commit({ ...S, players: [], courts: freshCourts(), matches: [], completed: [], round: 1, queueCounter: 0, draft: emptyDraft(), started: false });
 }
